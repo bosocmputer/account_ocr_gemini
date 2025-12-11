@@ -3,7 +3,7 @@
 // ไฟล์นี้เก็บ prompt templates ทั้งหมดที่ใช้สื่อสารกับ Gemini AI
 // แยกออกมาเพื่อให้อ่านและแก้ไขได้ง่าย ไม่ต้องไปหาใน gemini.go
 
-package main
+package ai
 
 // GetOCRPrompt สร้าง prompt สำหรับการอ่าน OCR และแปลงใบเสร็จเป็น JSON
 //

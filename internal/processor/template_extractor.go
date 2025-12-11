@@ -1,16 +1,17 @@
 // template_extractor.go - Helper functions to extract template information from AI response
 
-package main
+package processor
 
 import (
 	"strings"
 
+	"github.com/bosocmputer/account_ocr_gemini/internal/common"
 	"go.mongodb.org/mongo-driver/bson"
 )
 
 // ExtractTemplateInfo analyzes AI response to determine if a template was used
 // and extracts relevant information about the template selection
-func ExtractTemplateInfo(accountingResponse map[string]interface{}, documentTemplates []bson.M, reqCtx *RequestContext) map[string]interface{} {
+func ExtractTemplateInfo(accountingResponse map[string]interface{}, documentTemplates []bson.M, reqCtx *common.RequestContext) map[string]interface{} {
 	// Try to get AI explanation from validation
 	validation, ok := accountingResponse["validation"].(map[string]interface{})
 	if !ok {

@@ -1,6 +1,6 @@
 // cache.go - In-memory cache for master data
 
-package main
+package storage
 
 import (
 	"sync"
@@ -14,6 +14,8 @@ type MasterDataCache struct {
 	Accounts     []bson.M
 	JournalBooks []bson.M
 	Creditors    []bson.M
+	Debtors      []bson.M      // เพิ่มลูกหนี้
+	ShopProfile  *ShopProfile  // เพิ่มข้อมูลบริษัท
 	LoadedAt     time.Time
 	ShopID       string
 	mu           sync.RWMutex
@@ -62,11 +64,23 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 		return nil, err
 	}
 
+	debtors, err := GetDebtors(shopID, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+
+	shopProfile, err := GetShopProfile(shopID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create new cache
 	newCache := &MasterDataCache{
 		Accounts:     accounts,
 		JournalBooks: journalBooks,
 		Creditors:    creditors,
+		Debtors:      debtors,
+		ShopProfile:  shopProfile,
 		LoadedAt:     time.Now(),
 		ShopID:       shopID,
 	}

@@ -1,6 +1,6 @@
 // gemini_retry.go - Retry logic and error handling for Gemini API calls
 
-package main
+package ai
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bosocmputer/account_ocr_gemini/internal/common"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/googleapi"
 )
@@ -154,7 +155,7 @@ func callGeminiWithRetry(
 	model *genai.GenerativeModel,
 	prompt genai.Part,
 	image genai.Part,
-	reqCtx *RequestContext,
+	reqCtx *common.RequestContext,
 	config RetryConfig,
 ) (*genai.GenerateContentResponse, error) {
 

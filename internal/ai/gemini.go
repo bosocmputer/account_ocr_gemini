@@ -619,7 +619,7 @@ func ParseFlexibleNumber(raw interface{}, confidence float64) FlexibleValue {
 // System now uses processMultiImageAccountingAnalysis for all accounting analysis
 
 // processMultiImageAccountingAnalysis analyzes multiple images and creates merged accounting entries
-func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, documentTemplates []bson.M, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
+func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, debtors []bson.M, shopProfile interface{}, documentTemplates []bson.M, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
 	// Convert all OCR results to JSON for AI analysis
 	allResultsJSON, _ := json.MarshalIndent(map[string]interface{}{
 		"full_ocr_results":  fullResults,
@@ -627,7 +627,7 @@ func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 	}, "", "  ")
 
 	// Build multi-image accounting prompt
-	prompt := BuildMultiImageAccountingPrompt(string(allResultsJSON), accounts, journalBooks, creditors, documentTemplates)
+	prompt := BuildMultiImageAccountingPrompt(string(allResultsJSON), accounts, journalBooks, creditors, debtors, shopProfile, documentTemplates)
 
 	// Call Gemini API
 	reqCtx.StartSubStep("init_gemini_client")

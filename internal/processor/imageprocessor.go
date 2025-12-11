@@ -1,6 +1,6 @@
 // imageprocessor.go - Image preprocessing for better OCR accuracy
 
-package main
+package processor
 
 import (
 	"bytes"
@@ -115,7 +115,7 @@ func preprocessImageWithMode(imagePath string, mode PreprocessMode) ([]byte, str
 
 // preprocessImage applies various image enhancements to improve OCR accuracy (Balanced mode)
 // Returns the processed image data and mime type
-func preprocessImage(imagePath string) ([]byte, string, error) {
+func PreprocessImage(imagePath string) ([]byte, string, error) {
 	return preprocessImageWithMode(imagePath, BalancedMode)
 }
 
@@ -124,8 +124,8 @@ func preprocessImageFast(imagePath string) ([]byte, string, error) {
 	return preprocessImageWithMode(imagePath, FastMode)
 }
 
-// preprocessImageHighQuality applies intelligent adaptive processing for maximum accuracy (Phase 2)
-func preprocessImageHighQuality(imagePath string) ([]byte, string, error) {
+// PreprocessImageHighQuality applies intelligent adaptive processing for maximum accuracy (Phase 2)
+func PreprocessImageHighQuality(imagePath string) ([]byte, string, error) {
 	// Read the original image
 	img, err := imaging.Open(imagePath)
 	if err != nil {
@@ -345,11 +345,11 @@ func preprocessImageLegacy(imagePath string) ([]byte, string, error) {
 	return buf.Bytes(), mimeType, nil
 }
 
-// Removed preprocessImageAdvanced - use preprocessImageHighQuality instead
+// Removed preprocessImageAdvanced - use PreprocessImageHighQuality instead
 
 // Legacy preprocessImageAdvanced for backward compatibility
 func preprocessImageAdvanced(imagePath string) ([]byte, string, error) {
-	return preprocessImageHighQuality(imagePath)
+	return PreprocessImageHighQuality(imagePath)
 }
 
 func _unused_preprocessImageAdvanced(imagePath string) ([]byte, string, error) {

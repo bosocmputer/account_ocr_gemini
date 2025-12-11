@@ -1,6 +1,6 @@
 // request_context.go - Request tracking and logging system
 
-package common
+package api
 
 import (
 	"fmt"

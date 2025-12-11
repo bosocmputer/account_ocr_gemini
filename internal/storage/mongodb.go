@@ -1,4 +1,4 @@
-package main
+package storage
 
 import (
 	"context"
@@ -6,6 +6,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -20,7 +21,7 @@ func InitMongoDB() error {
 	defer cancel()
 
 	// Use connection URI from environment variable
-	connectionURI := MONGO_URI
+	connectionURI := configs.MONGO_URI
 
 	// Connect to MongoDB
 	clientOptions := options.Client().ApplyURI(connectionURI)
@@ -36,10 +37,15 @@ func InitMongoDB() error {
 	}
 
 	mongoClient = client
-	mongoDB = client.Database(MONGO_DB_NAME)
+	mongoDB = client.Database(configs.MONGO_DB_NAME)
 
 	log.Println("✅ Connected to MongoDB successfully!")
 	return nil
+}
+
+// GetMongoDB returns the MongoDB database instance
+func GetMongoDB() *mongo.Database {
+	return mongoDB
 }
 
 // CloseMongoDB closes MongoDB connection
@@ -50,6 +56,35 @@ func CloseMongoDB() {
 		mongoClient.Disconnect(ctx)
 		log.Println("MongoDB connection closed")
 	}
+}
+
+// ShopProfile represents a shop's profile information
+type ShopProfile struct {
+	GuidFixed string `bson:"guidfixed" json:"guidfixed"`
+	Name1     string `bson:"name1" json:"name1"`
+	Settings  struct {
+		TaxID string `bson:"taxid" json:"taxid"`
+	} `bson:"settings" json:"settings"`
+}
+
+// GetShopProfile retrieves shop profile by shopid (guidfixed)
+func GetShopProfile(shopID string) (*ShopProfile, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := mongoDB.Collection("shops")
+	filter := bson.M{"guidfixed": shopID}
+
+	var profile ShopProfile
+	err := collection.FindOne(ctx, filter).Decode(&profile)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("shop profile not found for shopid: %s", shopID)
+		}
+		return nil, fmt.Errorf("failed to query shop profile: %w", err)
+	}
+
+	return &profile, nil
 }
 
 // GetChartOfAccounts retrieves chart of accounts from MongoDB filtered by shopid
@@ -152,7 +187,8 @@ func GetDebtors(shopID string, additionalFilter bson.M) ([]bson.M, error) {
 	collection := mongoDB.Collection("debtors")
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query debtors: %w", err)
+		// Empty debtors is OK - some shops may not have debtors yet
+		return []bson.M{}, nil
 	}
 	defer cursor.Close(ctx)
 

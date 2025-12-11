@@ -1,4 +1,4 @@
-module go-receipt-parser
+module github.com/bosocmputer/account_ocr_gemini
 
 go 1.24.5
 
@@ -7,6 +7,7 @@ require (
 	github.com/gin-gonic/gin v1.11.0
 	github.com/google/generative-ai-go v0.20.1
 	github.com/google/uuid v1.6.0
+	github.com/joho/godotenv v1.5.1
 	go.mongodb.org/mongo-driver v1.17.6
 	google.golang.org/api v0.256.0
 )
@@ -35,7 +36,6 @@ require (
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.7 // indirect
 	github.com/googleapis/gax-go/v2 v2.15.0 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.16.7 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect

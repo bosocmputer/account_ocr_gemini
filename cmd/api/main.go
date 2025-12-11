@@ -11,12 +11,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/bosocmputer/account_ocr_gemini/configs"
+	"github.com/bosocmputer/account_ocr_gemini/internal/api"
+	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/gin-gonic/gin"
 )
 
 func main() {
 	// Step 0: Load configuration from environment variables
-	LoadConfig()
+	configs.LoadConfig()
 
 	// Step 0.5: Set production mode
 	if ginMode := os.Getenv("GIN_MODE"); ginMode == "release" {
@@ -24,20 +27,20 @@ func main() {
 	}
 
 	// Step 1: Create the UPLOAD_DIR folder if it doesn't exist
-	if err := os.MkdirAll(UPLOAD_DIR, 0755); err != nil {
+	if err := os.MkdirAll(configs.UPLOAD_DIR, 0755); err != nil {
 		log.Fatalf("Failed to create upload directory: %v", err)
 	} // Step 1.5: Initialize MongoDB connection
-	if err := InitMongoDB(); err != nil {
+	if err := storage.InitMongoDB(); err != nil {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
-	defer CloseMongoDB()
+	defer storage.CloseMongoDB()
 
 	// Step 2: Initialize the Gin router
 	router := gin.Default()
 
 	// Add CORS middleware - configure allowed origins for production
 	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", ALLOWED_ORIGINS)
+		c.Writer.Header().Set("Access-Control-Allow-Origin", configs.ALLOWED_ORIGINS)
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
@@ -59,11 +62,11 @@ func main() {
 	})
 
 	// Step 3: Define the API route
-	router.POST("/api/v1/analyze-receipt", analyzeReceiptHandler)
+	router.POST("/api/v1/analyze-receipt", api.AnalyzeReceiptHandler)
 
 	// Step 4: Setup HTTP server with timeouts
 	srv := &http.Server{
-		Addr:           ":" + PORT,
+		Addr:           ":" + configs.PORT,
 		Handler:        router,
 		ReadTimeout:    10 * time.Second,
 		WriteTimeout:   3 * time.Minute, // Allow up to 3 minutes for long-running requests
@@ -72,7 +75,7 @@ func main() {
 
 	// Start server in a goroutine
 	go func() {
-		log.Printf("Starting server on :%s", PORT)
+		log.Printf("Starting server on :%s", configs.PORT)
 		log.Println("API Endpoint: POST /api/v1/analyze-receipt")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

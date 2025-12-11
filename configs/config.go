@@ -1,6 +1,6 @@
 // config.go - Configuration loaded from environment variables
 
-package main
+package configs
 
 import (
 	"log"

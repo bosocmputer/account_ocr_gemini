@@ -248,8 +248,8 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		return
 	}
 
-	reqCtx.LogInfo("✓ Master data validated: %d accounts, %d journal books, %d creditors",
-		len(masterCache.Accounts), len(masterCache.JournalBooks), len(masterCache.Creditors))
+	reqCtx.LogInfo("✓ Master data validated: %d accounts, %d journal books, %d creditors, %d debtors",
+		len(masterCache.Accounts), len(masterCache.JournalBooks), len(masterCache.Creditors), len(masterCache.Debtors))
 
 	// ⚡ FETCH DOCUMENT FORMATE TEMPLATES (accounting patterns)
 	// This provides AI with predefined accounting entry templates for consistency
@@ -610,6 +610,8 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		accounts,
 		journalBooks,
 		creditors,
+		masterCache.Debtors,
+		masterCache.ShopProfile,
 		documentTemplates,
 		reqCtx,
 	)

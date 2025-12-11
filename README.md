@@ -71,37 +71,65 @@ github.com/google/uuid v1.6.0                // Unique ID generation
 ## 📁 โครงสร้างโปรเจกต์ | Project Structure
 
 ```
-go-receipt-parser/
+bill_scan_project/                    # Go Standard Layout
 │
-├── config.go          # การตั้งค่าโปรเจกต์ (API keys, paths, model name)
-├── gemini.go          # โลจิกการเรียก Gemini API และ schema ข้อมูล
-├── handlers.go        # HTTP handlers สำหรับรับไฟล์และประมวลผล
-├── main.go            # Entry point และ router setup
-├── go.mod             # Go module dependencies
-├── go.sum             # Dependency checksums
-├── uploads/           # โฟลเดอร์เก็บไฟล์ชั่วคราว (auto-created)
-└── README.md          # เอกสารนี้
+├── cmd/                              # Main applications
+│   └── api/
+│       └── main.go                   # Entry point และ server setup
+│
+├── internal/                         # Private application code
+│   ├── api/                         # HTTP layer
+│   │   ├── handlers.go              # HTTP handlers, validation
+│   │   └── request_context.go       # Request tracking & logging
+│   │
+│   ├── ai/                          # AI/ML processing
+│   │   ├── gemini.go                # Gemini API integration
+│   │   ├── gemini_retry.go          # Retry logic
+│   │   ├── prompt_system.go         # OCR prompts (Thai)
+│   │   └── prompts.go               # Accounting prompts
+│   │
+│   ├── processor/                   # Business logic
+│   │   ├── imageprocessor.go        # Image preprocessing
+│   │   └── template_extractor.go    # Template matching
+│   │
+│   └── storage/                     # Data access layer
+│       ├── mongodb.go               # MongoDB operations
+│       └── cache.go                 # In-memory caching
+│
+├── configs/                          # Configuration
+│   └── config.go                    # Environment config
+│
+├── deployments/                      # Deployment configs
+│   └── docker/
+│       ├── Dockerfile               # Container image
+│       └── docker-compose.yml       # Multi-container setup
+│
+├── docs/                            # Documentation
+│   ├── SYSTEM_DESIGN.md             # System architecture
+│   └── DOCKER_DEPLOY.md             # Deployment guide
+│
+├── uploads/                          # Temporary file storage
+├── go.mod                           # Go module definition
+├── go.sum                           # Dependency checksums
+├── Makefile                         # Build automation
+└── README.md                        # This file
 ```
 
-### รายละเอียดไฟล์ (File Details)
+### โครงสร้างตามมาตรฐาน Go | Go Standard Layout
 
-#### 1. `config.go`
-- เก็บค่าคงที่สำคัญ: API Key, Upload Directory, Model Name
-- **Warning**: ในการใช้งานจริง ควรใช้ Environment Variables
+โปรเจกต์นี้ใช้ [Go Standard Project Layout](https://github.com/golang-standards/project-layout) ซึ่งเป็นมาตรฐานที่ยอมรับในชุมชน Go:
 
-#### 2. `gemini.go`
-- **Structs**: `ReceiptItem`, `ExtractionResult`
-- **Functions**: 
-  - `processOCRAndGemini()`: ประมวลผลและเรียก Gemini API
-  - `createSchema()`: สร้าง JSON Schema สำหรับ Gemini
+- **`/cmd`**: Entry points แยกตาม application
+- **`/internal`**: Private code ที่ไม่สามารถ import จากภายนอกได้
+- **`/configs`**: Configuration และ environment variables
+- **`/deployments`**: IaaS, PaaS, container configs
+- **`/docs`**: Design documents และ user guides
 
-#### 3. `handlers.go`
-- `extractHandler()`: รับไฟล์รูปภาพ, บันทึกชั่วคราว, เรียกประมวลผล, ส่งผลลัพธ์
-
-#### 4. `main.go`
-- สร้างโฟลเดอร์ uploads
-- ตั้งค่า Gin router
-- เปิดเซิร์ฟเวอร์พอร์ต 8080
+**ข้อดี:**
+- ✅ Scalable: เพิ่ม features ใหม่ได้ง่าย
+- ✅ Maintainable: แยก concerns ชัดเจน
+- ✅ Testable: Mock dependencies ได้ง่าย
+- ✅ Professional: ตามมาตรฐานที่ใช้ใน production-grade projects
 
 ---
 
@@ -130,7 +158,15 @@ const GEMINI_API_KEY = "YOUR_ACTUAL_API_KEY_HERE"
 
 ### 4. รันเซิร์ฟเวอร์
 ```bash
-go run .
+# วิธีที่ 1: ใช้ go run
+go run ./cmd/api
+
+# วิธีที่ 2: ใช้ Makefile
+make run
+
+# วิธีที่ 3: Build แล้วรัน
+make build
+./bin/go-receipt-parser
 ```
 
 คุณจะเห็นข้อความ:
@@ -352,7 +388,7 @@ MAKRO สาขา: นวมินทร์
 
 ```mermaid
 graph LR
-    A[Flutter App] -->|Upload Image| B[Gin API]
+    A[Fontend] -->|Url Image| B[Gin API]
     B -->|Save Temp File| C[uploads/]
     C -->|OCR Text| D[Gemini AI]
     D -->|Structured JSON| E[ExtractionResult]

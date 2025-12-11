@@ -14,12 +14,12 @@ help:
 # Run the application
 run:
 	@echo "🚀 Starting Go-Receipt-Parser..."
-	@go run .
+	@go run ./cmd/api
 
 # Build the application
 build:
 	@echo "🔨 Building application..."
-	@go build -o bin/go-receipt-parser .
+	@go build -o bin/go-receipt-parser ./cmd/api
 	@echo "✅ Build complete: bin/go-receipt-parser"
 
 # Run tests
