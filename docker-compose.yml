@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: go-receipt-parser
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    env_file:
+      - .env
+    environment:
+      # Override with environment-specific values if needed
+      - GIN_MODE=${GIN_MODE:-release}
+    volumes:
+      - ./uploads:/root/uploads
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:${PORT:-8080}/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - receipt-network
+
+networks:
+  receipt-network:
+    driver: bridge
