@@ -1,6 +1,6 @@
 // handlers.go - Contains the HTTP handler function for file upload and validation logic.
 
-package main
+package api
 
 import (
 	"context"
@@ -12,6 +12,11 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/bosocmputer/account_ocr_gemini/configs"
+	"github.com/bosocmputer/account_ocr_gemini/internal/ai"
+	"github.com/bosocmputer/account_ocr_gemini/internal/common"
+	"github.com/bosocmputer/account_ocr_gemini/internal/processor"
+	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
@@ -99,10 +104,10 @@ func ValidateDoubleEntry(entries []JournalEntry) (bool, float64, float64) {
 	return balanced, totalDebit, totalCredit
 }
 
-// fetchDocumentFormate retrieves accounting templates from documentFormate collection
+// FetchDocumentFormate retrieves accounting templates from documentFormate collection
 // Returns only templates that have details (not empty templates)
-func fetchDocumentFormate(shopID string) ([]bson.M, error) {
-	collection := mongoDB.Collection("documentFormate")
+func FetchDocumentFormate(shopID string) ([]bson.M, error) {
+	collection := storage.GetMongoDB().Collection("documentFormate")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -176,9 +181,9 @@ func downloadImageFromURL(imageURL, filename string) error {
 
 // --- New Analyze Receipt Handler (Phase 1 Complete Flow) ---
 
-// analyzeReceiptHandler handles POST requests to /api/v1/analyze-receipt
+// AnalyzeReceiptHandler handles POST requests to /api/v1/analyze-receipt
 // It performs full OCR + accounting analysis with master data integration
-func analyzeReceiptHandler(c *gin.Context) {
+func AnalyzeReceiptHandler(c *gin.Context) {
 	// Step 1: Parse JSON request body
 	var req ExtractRequest
 	if err := c.BindJSON(&req); err != nil {
@@ -207,11 +212,11 @@ func analyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Create request context for tracking
-	reqCtx := NewRequestContext(req.ShopID)
+	reqCtx := common.NewRequestContext(req.ShopID)
 
 	// ⚡ VALIDATE MASTER DATA FIRST (before any AI processing)
 	// This saves tokens and processing time if master data is missing
-	masterCache, err := GetOrLoadMasterData(req.ShopID)
+	masterCache, err := storage.GetOrLoadMasterData(req.ShopID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":      "Failed to load master data",
@@ -248,7 +253,7 @@ func analyzeReceiptHandler(c *gin.Context) {
 
 	// ⚡ FETCH DOCUMENT FORMATE TEMPLATES (accounting patterns)
 	// This provides AI with predefined accounting entry templates for consistency
-	documentTemplates, err := fetchDocumentFormate(req.ShopID)
+	documentTemplates, err := FetchDocumentFormate(req.ShopID)
 	if err != nil {
 		reqCtx.LogWarning("Failed to fetch documentFormate templates: %v", err)
 		// Continue without templates - AI will work without them
@@ -323,7 +328,7 @@ func analyzeReceiptHandler(c *gin.Context) {
 
 		// Generate unique filename for downloaded image
 		uniqueID := uuid.New().String()
-		filename := filepath.Join(UPLOAD_DIR, fmt.Sprintf("%s_%d.jpg", uniqueID, i))
+		filename := filepath.Join(configs.UPLOAD_DIR, fmt.Sprintf("%s_%d.jpg", uniqueID, i))
 
 		// Download image from Azure Blob Storage
 		if err := downloadImageFromURL(imgRef.ImageURI, filename); err != nil {
@@ -373,13 +378,13 @@ func analyzeReceiptHandler(c *gin.Context) {
 
 	type FullOCRImageResult struct {
 		ImageIndex int
-		Result     *ExtractionResult
-		Tokens     *TokenUsage
+		Result     *ai.ExtractionResult
+		Tokens     *common.TokenUsage
 		Error      error
 	}
 
 	var fullOCRResults []FullOCRImageResult
-	var totalFullOCRTokens TokenUsage
+	var totalFullOCRTokens common.TokenUsage
 
 	// Collect Phase 2 quality issues
 	var phase2FailedImages []FailedImageInfo
@@ -403,7 +408,7 @@ func analyzeReceiptHandler(c *gin.Context) {
 	for w := 0; w < numWorkers; w++ {
 		go func() {
 			for job := range jobsChan {
-				result, fullOCRTokens, err := processOCRAndGemini(job.img.Filename, reqCtx)
+				result, fullOCRTokens, err := ai.ProcessOCRAndGemini(job.img.Filename, reqCtx)
 				resultsChan <- FullOCRImageResult{
 					ImageIndex: job.img.Index,
 					Result:     result,
@@ -599,7 +604,7 @@ func analyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Process multi-image accounting analysis
-	accountingJSON, phase2Tokens, err := processMultiImageAccountingAnalysis(
+	accountingJSON, phase2Tokens, err := ai.ProcessMultiImageAccountingAnalysis(
 		downloadedImages,
 		fullOCRResults,
 		accounts,
@@ -718,7 +723,7 @@ func analyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Extract template information (which template AI used and why)
-	templateInfo := ExtractTemplateInfo(accountingResponse, documentTemplates, reqCtx)
+	templateInfo := processor.ExtractTemplateInfo(accountingResponse, documentTemplates, reqCtx)
 
 	// Get primary receipt data from accounting response or first successful OCR result
 	var receiptData map[string]interface{}
@@ -731,13 +736,30 @@ func analyzeReceiptHandler(c *gin.Context) {
 				receiptData = gin.H{
 					"number":        ocrResult.Result.ReceiptNumber,
 					"date":          ocrResult.Result.InvoiceDate,
-					"vendor_name":   "N/A", // Vendor info now comes from Phase 3 accounting analysis
-					"vendor_tax_id": "N/A",
+					"vendor_name":   "Unknown Vendor", // Vendor info now comes from Phase 3 accounting analysis
+					"vendor_tax_id": "Unknown Vendor",
 					"total":         ocrResult.Result.TotalAmount.Value,
 					"vat":           ocrResult.Result.VATAmount.Value,
 				}
 				break
 			}
+		}
+	}
+
+	// Priority 1: Add fields_requiring_review array
+	fieldsRequiringReview := []string{}
+	if receiptData != nil {
+		if vendorName, ok := receiptData["vendor_name"].(string); ok && (vendorName == "Unknown Vendor" || vendorName == "N/A" || vendorName == "") {
+			fieldsRequiringReview = append(fieldsRequiringReview, "vendor_name")
+		}
+		if vendorTaxID, ok := receiptData["vendor_tax_id"].(string); ok && (vendorTaxID == "Unknown Vendor" || vendorTaxID == "N/A" || vendorTaxID == "") {
+			fieldsRequiringReview = append(fieldsRequiringReview, "vendor_tax_id")
+		}
+	}
+	if len(fieldsRequiringReview) > 0 {
+		validationData["fields_requiring_review"] = fieldsRequiringReview
+		if requiresReview, ok := validationData["requires_review"].(bool); !ok || !requiresReview {
+			validationData["requires_review"] = true
 		}
 	}
 

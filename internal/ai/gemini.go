@@ -1,6 +1,6 @@
 // gemini.go - Contains data structs, Gemini API logic, and the OCR placeholder.
 
-package main
+package ai
 
 import (
 	"context"
@@ -11,11 +11,70 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/bosocmputer/account_ocr_gemini/configs"
+	"github.com/bosocmputer/account_ocr_gemini/internal/common"
+	"github.com/bosocmputer/account_ocr_gemini/internal/processor"
 	"github.com/google/generative-ai-go/genai"
 	"go.mongodb.org/mongo-driver/bson"
 	"google.golang.org/api/option"
 )
+
+// --- Date Validation (Priority 1) ---
+
+func validateReceiptDate(dateStr string, result *ExtractionResult) error {
+	// Try common Thai date formats
+	formats := []string{
+		"02/01/2006", // DD/MM/YYYY
+		"2/1/2006",   // D/M/YYYY
+		"02-01-2006", // DD-MM-YYYY
+		"2006-01-02", // YYYY-MM-DD
+	}
+
+	var parsedDate time.Time
+	var parseErr error
+	for _, format := range formats {
+		if t, err := time.Parse(format, dateStr); err == nil {
+			parsedDate = t
+			parseErr = nil
+			break
+		} else {
+			parseErr = err
+		}
+	}
+
+	if parseErr != nil {
+		// Can't parse date, skip validation
+		return nil
+	}
+
+	// Convert Buddhist Era to Gregorian if year > 2100
+	if parsedDate.Year() > 2100 {
+		parsedDate = parsedDate.AddDate(-543, 0, 0)
+	}
+
+	// Check if date is more than 7 days in the future
+	now := time.Now()
+	sevenDaysFromNow := now.AddDate(0, 0, 7)
+
+	if parsedDate.After(sevenDaysFromNow) {
+		// Set requires_review = true
+		result.Validation.RequiresReview = true
+
+		// Lower confidence score due to suspicious future date
+		if result.Validation.OverallConfidence.Score > 70 {
+			result.Validation.OverallConfidence.Score = 70
+		}
+		if result.Validation.OverallConfidence.Level == "high" {
+			result.Validation.OverallConfidence.Level = "medium"
+		}
+
+		return fmt.Errorf("future date detected: %s (> 7 days from now)", dateStr)
+	}
+
+	return nil
+}
 
 // --- Structs for Data Handling (JSON Schema) ---
 
@@ -154,11 +213,11 @@ type ExtractionResult struct {
 // --- Core Processing Function: OCR (Placeholder) + Gemini (Actual Call) ---
 
 // processOCRAndGemini processes the receipt image and extracts structured data using Gemini API
-func processOCRAndGemini(imagePath string, reqCtx *RequestContext) (*ExtractionResult, *TokenUsage, error) {
+func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*ExtractionResult, *common.TokenUsage, error) {
 	// Step 1: Preprocess the image with HIGH QUALITY mode for maximum accuracy
 	// This applies aggressive enhancements: sharpen, contrast, brightness, grayscale
 	reqCtx.StartSubStep("image_preprocessing")
-	imageData, mimeType, err := preprocessImageHighQuality(imagePath)
+	imageData, mimeType, err := processor.PreprocessImageHighQuality(imagePath)
 	reqCtx.EndSubStep("")
 	if err != nil {
 		// If preprocessing fails, fall back to original image
@@ -186,13 +245,13 @@ func processOCRAndGemini(imagePath string, reqCtx *RequestContext) (*ExtractionR
 	// Step 2: Initialize the Gemini client
 	reqCtx.StartSubStep("init_gemini_client")
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(GEMINI_API_KEY))
+	client, err := genai.NewClient(ctx, option.WithAPIKey(configs.GEMINI_API_KEY))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel(MODEL_NAME)
+	model := client.GenerativeModel(configs.MODEL_NAME)
 	reqCtx.EndSubStep("")
 
 	// Step 3: Define the detailed JSON schema
@@ -264,24 +323,31 @@ func processOCRAndGemini(imagePath string, reqCtx *RequestContext) (*ExtractionR
 	// Step 8: Add AI metadata
 	reqCtx.StartSubStep("extract_metadata")
 	result.Metadata = AIMetadata{
-		ModelName: MODEL_NAME,
+		ModelName: configs.MODEL_NAME,
 	}
 
 	// Extract token usage if available
-	var tokenUsage *TokenUsage
+	var tokenUsage *common.TokenUsage
 	if resp.UsageMetadata != nil {
 		result.Metadata.PromptTokens = resp.UsageMetadata.PromptTokenCount
 		result.Metadata.CandidatesTokens = resp.UsageMetadata.CandidatesTokenCount
 		result.Metadata.TotalTokens = resp.UsageMetadata.TotalTokenCount
 
 		// Calculate cost
-		tokens := CalculateTokenCost(
+		tokens := common.CalculateTokenCost(
 			int(resp.UsageMetadata.PromptTokenCount),
 			int(resp.UsageMetadata.CandidatesTokenCount),
 		)
 		tokenUsage = &tokens
 	}
 	reqCtx.EndSubStep(fmt.Sprintf("tokens: %d", tokenUsage.TotalTokens))
+
+	// Priority 1: Date validation - check for future dates
+	if dateStr := result.InvoiceDate.GetString(); dateStr != "" {
+		if err := validateReceiptDate(dateStr, &result); err != nil {
+			reqCtx.LogWarning(fmt.Sprintf("⚠️  Date validation warning: %s", err.Error()))
+		}
+	}
 
 	// Debug: Log what AI extracted in Phase 2
 	log.Printf("[%s] 📄 PHASE 2 - Full OCR Extraction:", reqCtx.RequestID)
@@ -553,7 +619,7 @@ func ParseFlexibleNumber(raw interface{}, confidence float64) FlexibleValue {
 // System now uses processMultiImageAccountingAnalysis for all accounting analysis
 
 // processMultiImageAccountingAnalysis analyzes multiple images and creates merged accounting entries
-func processMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, documentTemplates []bson.M, reqCtx *RequestContext) (string, *TokenUsage, error) {
+func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, documentTemplates []bson.M, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
 	// Convert all OCR results to JSON for AI analysis
 	allResultsJSON, _ := json.MarshalIndent(map[string]interface{}{
 		"full_ocr_results":  fullResults,
@@ -566,13 +632,13 @@ func processMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 	// Call Gemini API
 	reqCtx.StartSubStep("init_gemini_client")
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(GEMINI_API_KEY))
+	client, err := genai.NewClient(ctx, option.WithAPIKey(configs.GEMINI_API_KEY))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel(MODEL_NAME)
+	model := client.GenerativeModel(configs.MODEL_NAME)
 	model.SetTemperature(0.2)
 	reqCtx.EndSubStep("")
 
@@ -632,9 +698,9 @@ func processMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 	}
 
 	// Calculate token usage
-	var tokenUsage *TokenUsage
+	var tokenUsage *common.TokenUsage
 	if resp.UsageMetadata != nil {
-		tokens := CalculateTokenCost(
+		tokens := common.CalculateTokenCost(
 			int(resp.UsageMetadata.PromptTokenCount),
 			int(resp.UsageMetadata.CandidatesTokenCount),
 		)
