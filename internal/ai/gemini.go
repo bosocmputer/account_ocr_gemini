@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -16,10 +17,77 @@ import (
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/bosocmputer/account_ocr_gemini/internal/common"
 	"github.com/bosocmputer/account_ocr_gemini/internal/processor"
+	"github.com/bosocmputer/account_ocr_gemini/internal/ratelimit"
 	"github.com/google/generative-ai-go/genai"
 	"go.mongodb.org/mongo-driver/bson"
 	"google.golang.org/api/option"
 )
+
+// fixJSONEscaping fixes common JSON escaping issues from Gemini AI responses
+// Problem: Gemini sometimes sends literal newlines inside JSON strings instead of \n
+// This breaks Go's JSON parser which requires proper escaping
+func fixJSONEscaping(jsonStr string) string {
+	// Strategy: Find string values and escape any unescaped special characters inside them
+	// Enhanced to handle more edge cases from complex documents (tables, forms, etc.)
+
+	// Match JSON string values: "key": "value with\npotential\nnewlines"
+	// We need to find strings and escape literal newlines, tabs, quotes, backslashes
+
+	// Use regex to find all string values in JSON
+	// Pattern: "([^"\\]*(\\.[^"\\]*)*)"
+	// This matches: "anything including \" but not unescaped quotes"
+
+	re := regexp.MustCompile(`"([^"]*(?:\\.[^"]*)*)"`)
+
+	result := re.ReplaceAllStringFunc(jsonStr, func(match string) string {
+		// Extract the content between quotes
+		if len(match) < 2 {
+			return match
+		}
+
+		content := match[1 : len(match)-1] // Remove surrounding quotes
+
+		// Escape special characters that aren't already escaped
+		// Important: Order matters! Do backslashes first to avoid double-escaping
+
+		// 1. Fix invalid escape sequences (e.g., "\ " with space after backslash)
+		// Replace backslash followed by space with escaped backslash + space
+		content = strings.ReplaceAll(content, "\\ ", "\\\\ ")
+
+		// 2. Replace literal newlines with \n
+		content = strings.ReplaceAll(content, "\n", "\\n")
+
+		// 3. Replace literal carriage returns with \r
+		content = strings.ReplaceAll(content, "\r", "\\r")
+
+		// 4. Replace literal tabs with \t
+		content = strings.ReplaceAll(content, "\t", "\\t")
+
+		// 5. Replace literal form feed with \f
+		content = strings.ReplaceAll(content, "\f", "\\f")
+
+		// 6. Replace literal backspace with \b
+		content = strings.ReplaceAll(content, "\b", "\\b")
+
+		// 7. Handle other control characters (0x00-0x1F) except those already handled
+		// Convert to \uXXXX format for safety
+		var builder strings.Builder
+		for _, ch := range content {
+			if ch < 0x20 && ch != '\n' && ch != '\r' && ch != '\t' && ch != '\f' && ch != '\b' {
+				// Control character - escape it
+				builder.WriteString(fmt.Sprintf("\\u%04x", ch))
+			} else {
+				builder.WriteRune(ch)
+			}
+		}
+		content = builder.String()
+
+		// Return with quotes
+		return `"` + content + `"`
+	})
+
+	return result
+}
 
 // --- Date Validation (Priority 1) ---
 
@@ -197,23 +265,43 @@ type AIMetadata struct {
 	TotalTokens      int32  `json:"total_tokens"`
 }
 
-// ExtractionResult represents the complete extraction result from the receipt
-type ExtractionResult struct {
-	Status        string        `json:"status"`
-	ReceiptNumber FlexibleValue `json:"receipt_number"`
-	InvoiceDate   FlexibleValue `json:"invoice_date"`
-	TotalAmount   FlexibleValue `json:"total_amount"`
-	VATAmount     FlexibleValue `json:"vat_amount"`
-	Items         []ReceiptItem `json:"items"`
-	Validation    Validation    `json:"validation"`
-	Metadata      AIMetadata    `json:"metadata"`
-	RawResponse   string        `json:"raw_response,omitempty"` // Full AI response for debugging
+// SimpleOCRResult represents Pure OCR result (raw text only)
+type SimpleOCRResult struct {
+	Status          string     `json:"status"`
+	RawDocumentText string     `json:"raw_document_text"` // ข้อความทั้งหมดจากเอกสาร
+	Metadata        AIMetadata `json:"metadata"`
+	RawResponse     string     `json:"raw_response,omitempty"`
 }
 
-// --- Core Processing Function: OCR (Placeholder) + Gemini (Actual Call) ---
+// TemplateMatchResult represents AI-based template matching result
+type TemplateMatchResult struct {
+	MatchedTemplate string `json:"matched_template"` // ชื่อ template ที่ตรงที่สุด
+	Confidence      int    `json:"confidence"`       // ความมั่นใจ 0-100
+	Reasoning       string `json:"reasoning"`        // เหตุผลที่เลือก template นี้
+}
 
-// processOCRAndGemini processes the receipt image and extracts structured data using Gemini API
-func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*ExtractionResult, *common.TokenUsage, error) {
+// DEPRECATED: ExtractionResult - ไม่ใช้แล้ว (เก็บไว้เพื่อ backward compatibility)
+// ใช้ SimpleOCRResult แทน
+type ExtractionResult struct {
+	Status          string        `json:"status"`
+	ReceiptNumber   FlexibleValue `json:"receipt_number"`
+	InvoiceDate     FlexibleValue `json:"invoice_date"`
+	VendorName      FlexibleValue `json:"vendor_name"`
+	VendorTaxID     FlexibleValue `json:"vendor_tax_id"`
+	RawDocumentText string        `json:"raw_document_text"`
+	TotalAmount     FlexibleValue `json:"total_amount"`
+	VATAmount       FlexibleValue `json:"vat_amount"`
+	Items           []ReceiptItem `json:"items"`
+	Validation      Validation    `json:"validation"`
+	Metadata        AIMetadata    `json:"metadata"`
+	RawResponse     string        `json:"raw_response,omitempty"`
+}
+
+// --- Core Processing Function: Pure OCR (New Simplified Version) ---
+
+// ProcessPureOCR processes the receipt image and extracts ONLY raw text using Gemini API
+// This is faster and cheaper than full structured extraction
+func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCRResult, *common.TokenUsage, error) {
 	// Step 1: Preprocess the image with HIGH QUALITY mode for maximum accuracy
 	// This applies aggressive enhancements: sharpen, contrast, brightness, grayscale
 	reqCtx.StartSubStep("image_preprocessing")
@@ -221,7 +309,7 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 	reqCtx.EndSubStep("")
 	if err != nil {
 		// If preprocessing fails, fall back to original image
-		fmt.Printf("Warning: High-quality image preprocessing failed, using original: %v\n", err)
+		reqCtx.LogInfo("⚠️  High-quality image preprocessing failed, using original: %v", err)
 		imageData, err = os.ReadFile(imagePath)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read image file: %w", err)
@@ -242,6 +330,10 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 		}
 	}
 
+	// Log image size for debugging
+	imageSize := len(imageData)
+	reqCtx.LogInfo("📸 Image size: %d bytes (%.2f MB)", imageSize, float64(imageSize)/(1024*1024))
+
 	// Step 2: Initialize the Gemini client
 	reqCtx.StartSubStep("init_gemini_client")
 	ctx := context.Background()
@@ -254,9 +346,9 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 	model := client.GenerativeModel(configs.MODEL_NAME)
 	reqCtx.EndSubStep("")
 
-	// Step 3: Define the detailed JSON schema
+	// Step 3: Define the simple JSON schema (raw text only)
 	reqCtx.StartSubStep("create_json_schema")
-	schema := createSchema()
+	schema := createSimpleOCRSchema()
 	reqCtx.EndSubStep("")
 
 	// Step 4: Configure the model with JSON response
@@ -265,10 +357,10 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 	model.ResponseSchema = schema
 	reqCtx.EndSubStep("")
 
-	// Step 5: Construct the prompt for image analysis with enhanced OCR instructions
+	// Step 5: Construct the prompt for Pure OCR (simplified)
 	reqCtx.StartSubStep("build_prompt")
-	// ใช้ prompt จากไฟล์ prompt_system.go (ภาษาไทย เพื่อให้อ่านและแก้ไขง่าย)
-	prompt := GetOCRPrompt()
+	// ใช้ Pure OCR prompt - อ่านแค่ข้อความ ไม่ต้อง extract structure
+	prompt := GetPureOCRPrompt()
 	reqCtx.EndSubStep("")
 
 	// Step 6: Call the Gemini API with the actual image (with retry logic)
@@ -312,10 +404,25 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 		return nil, nil, fmt.Errorf("empty response from Gemini API")
 	}
 
-	// Step 7: Unmarshal the JSON into ExtractionResult struct
-	var result ExtractionResult
+	// Log response length for debugging
+	reqCtx.LogInfo("📦 Received JSON response: %d chars", len(jsonResponse))
+
+	// IMPORTANT: Fix JSON escaping issues from Gemini AI
+	// Gemini sometimes sends unescaped newlines in JSON strings which breaks Go's JSON parser
+	// We need to properly escape them before unmarshaling
+	jsonResponse = fixJSONEscaping(jsonResponse)
+
+	// Step 7: Unmarshal the JSON into SimpleOCRResult struct
+	var result SimpleOCRResult
 	if err := json.Unmarshal([]byte(jsonResponse), &result); err != nil {
 		reqCtx.EndSubStep("❌ FAILED")
+		// Log the problematic JSON response for debugging (first 500 chars)
+		preview := jsonResponse
+		if len(preview) > 500 {
+			preview = preview[:500] + "... (truncated)"
+		}
+		reqCtx.LogInfo("⚠️  Failed to parse JSON response. Preview: %s", preview)
+		reqCtx.LogInfo("⚠️  JSON Parse Error: %v", err)
 		return nil, nil, fmt.Errorf("failed to unmarshal JSON response: %w", err)
 	}
 	reqCtx.EndSubStep("")
@@ -342,17 +449,10 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 	}
 	reqCtx.EndSubStep(fmt.Sprintf("tokens: %d", tokenUsage.TotalTokens))
 
-	// Priority 1: Date validation - check for future dates
-	if dateStr := result.InvoiceDate.GetString(); dateStr != "" {
-		if err := validateReceiptDate(dateStr, &result); err != nil {
-			reqCtx.LogWarning(fmt.Sprintf("⚠️  Date validation warning: %s", err.Error()))
-		}
-	}
-
-	// Debug: Log what AI extracted in Phase 2
-	log.Printf("[%s] 📄 PHASE 2 - Full OCR Extraction:", reqCtx.RequestID)
-	log.Printf("[%s]   - Receipt #: %v | Date: %v", reqCtx.RequestID, result.ReceiptNumber.Value, result.InvoiceDate.Value)
-	log.Printf("[%s]   - Items: %d | Total: %v | VAT: %v", reqCtx.RequestID, len(result.Items), result.TotalAmount.Value, result.VATAmount.Value)
+	// Debug: Log what AI extracted in Phase 2 (Pure OCR)
+	log.Printf("[%s] 📄 PHASE 2 - Pure OCR Extraction:", reqCtx.RequestID)
+	log.Printf("[%s]   - Raw Document Text Length: %d chars", reqCtx.RequestID, len(result.RawDocumentText))
+	log.Printf("[%s]   - Full Text:\n%s", reqCtx.RequestID, result.RawDocumentText)
 
 	// Store raw response for debugging
 	result.RawResponse = jsonResponse
@@ -360,7 +460,48 @@ func ProcessOCRAndGemini(imagePath string, reqCtx *common.RequestContext) (*Extr
 	return &result, tokenUsage, nil
 }
 
-// createSchema creates the JSON schema for the ExtractionResult with confidence tracking
+// createSimpleOCRSchema creates the JSON schema for Pure OCR (raw text only)
+func createSimpleOCRSchema() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"status": {
+				Type:        genai.TypeString,
+				Description: "Status of the extraction (success or error)",
+			},
+			"raw_document_text": {
+				Type:        genai.TypeString,
+				Description: "All visible text from the document. Read from top to bottom, left to right. Include everything: headers, content, footers, notes. Separate lines with newline (\\n). DO NOT format, analyze, or structure - just read and return raw text.",
+			},
+		},
+		Required: []string{"status", "raw_document_text"},
+	}
+}
+
+// createTemplateMatchSchema creates the JSON schema for AI template matching
+func createTemplateMatchSchema() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"matched_template": {
+				Type:        genai.TypeString,
+				Description: "ชื่อ template ที่ตรงที่สุดกับเอกสาร (ต้องตรงกับ description ที่ให้มาเท่านั้น)",
+			},
+			"confidence": {
+				Type:        genai.TypeInteger,
+				Description: "ความมั่นใจ 0-100 (ต่ำกว่า 60 = ไม่แน่ใจ, 60-84 = ค่อนข้างแน่ใจ, 85-100 = แน่ใจมาก)",
+			},
+			"reasoning": {
+				Type:        genai.TypeString,
+				Description: "เหตุผลที่เลือก template นี้ (สั้นๆ ภาษาไทย)",
+			},
+		},
+		Required: []string{"matched_template", "confidence", "reasoning"},
+	}
+}
+
+// DEPRECATED: createSchema - ไม่ใช้แล้ว (เก็บไว้สำหรับ backward compatibility)
+// ใช้ createSimpleOCRSchema() แทน
 func createSchema() *genai.Schema {
 	// Schema for field confidence (hybrid: level + score)
 	fieldConfidenceSchema := &genai.Schema{
@@ -405,6 +546,18 @@ func createSchema() *genai.Schema {
 			"invoice_date": {
 				Type:        genai.TypeString,
 				Description: "Date of the invoice in DD/MM/YYYY format",
+			},
+			"vendor_name": {
+				Type:        genai.TypeString,
+				Description: "CRITICAL: ชื่อผู้ออกเอกสาร/ผู้ขาย - มักอยู่ที่หัวเอกสาร (header) เป็นชื่อตัวใหญ่/ตัวหนาบนสุด มีคำว่า 'บริษัท', 'หจก.', 'บจก.', 'ห้างหุ้นส่วน', 'ร้าน' นำหน้า. ถ้าไม่เจอให้หาชื่อที่อยู่ใกล้ 'เลขประจำตัวผู้เสียภาษี' หรือชื่อในส่วนที่อยู่บนสุดของเอกสาร",
+			},
+			"vendor_tax_id": {
+				Type:        genai.TypeString,
+				Description: "เลขประจำตัวผู้เสียภาษีของผู้ออกเอกสาร (13 หลัก) - มักมีคำว่า 'เลขประจำตัวผู้เสียภาษี' หรือ 'Tax ID' นำหน้า",
+			},
+			"raw_document_text": {
+				Type:        genai.TypeString,
+				Description: "CRITICAL: ข้อความทั้งหมดที่อ่านได้จากเอกสาร - รวมทุกอย่าง: header, footer, ที่อยู่, เบอร์โทร, อีเมล, หมายเหตุ, ข้อความพิเศษ, ทุกบรรทัดที่มองเห็น. อ่านจากบนลงล่าง ซ้ายไปขวา ตามลำดับที่ปรากฏในเอกสาร. ไม่จำกัดความยาว - ยิ่งละเอียดยิ่งดี!",
 			},
 			"total_amount": {
 				Type:        genai.TypeNumber,
@@ -474,6 +627,8 @@ func createSchema() *genai.Schema {
 						Properties: map[string]*genai.Schema{
 							"receipt_number": fieldConfidenceSchema,
 							"invoice_date":   fieldConfidenceSchema,
+							"vendor_name":    fieldConfidenceSchema,
+							"vendor_tax_id":  fieldConfidenceSchema,
 							"total_amount":   fieldConfidenceSchema,
 							"vat_amount":     fieldConfidenceSchema,
 							"items": {
@@ -619,15 +774,16 @@ func ParseFlexibleNumber(raw interface{}, confidence float64) FlexibleValue {
 // System now uses processMultiImageAccountingAnalysis for all accounting analysis
 
 // processMultiImageAccountingAnalysis analyzes multiple images and creates merged accounting entries
-func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, debtors []bson.M, shopProfile interface{}, documentTemplates []bson.M, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
+// NEW: Supports conditional master data loading via mode parameter
+func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, mode MasterDataMode, matchedTemplate *bson.M, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, debtors []bson.M, shopProfile interface{}, documentTemplates []bson.M, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
 	// Convert all OCR results to JSON for AI analysis
 	allResultsJSON, _ := json.MarshalIndent(map[string]interface{}{
 		"full_ocr_results":  fullResults,
 		"downloaded_images": downloadedImages,
 	}, "", "  ")
 
-	// Build multi-image accounting prompt
-	prompt := BuildMultiImageAccountingPrompt(string(allResultsJSON), accounts, journalBooks, creditors, debtors, shopProfile, documentTemplates)
+	// Build multi-image accounting prompt with conditional master data
+	prompt := BuildMultiImageAccountingPrompt(string(allResultsJSON), mode, matchedTemplate, accounts, journalBooks, creditors, debtors, shopProfile, documentTemplates)
 
 	// Call Gemini API
 	reqCtx.StartSubStep("init_gemini_client")
@@ -640,12 +796,90 @@ func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 
 	model := client.GenerativeModel(configs.MODEL_NAME)
 	model.SetTemperature(0.2)
+
+	// 🚨 Set System Instruction - CRITICAL for Template Enforcement
+	// System instructions have higher priority than user prompts
+	model.SystemInstruction = &genai.Content{
+		Parts: []genai.Part{
+			genai.Text(`You are a Thai accounting AI assistant. Your PRIMARY RULES:
+
+RULE #0 - WITHHOLDING TAX CERTIFICATES [HIGHEST PRIORITY]:
+For "หนังสือรับรองการหักภาษี ณ ที่จ่าย" (Withholding Tax Certificates):
+1. ALWAYS set template_used = false - NO EXCEPTIONS
+2. IGNORE any template matching with "บันทึกค่าทำบัญชี" or other templates
+3. These documents are TAX CERTIFICATES, not expense receipts
+4. Extract accounting entries from the certificate content:
+   - Check "Income Type" field (e.g., มาตรา 40(1), 40(2), 40(8))
+   - DO NOT look at "item descriptions" or "payment reasons"
+   - Use income type to determine account classification
+5. If income type is wages/salary (เงินเดือน) → Use Master Data accounts
+6. If income type is service fees (ค่าบริการ) → Use Master Data accounts
+7. NEVER match templates based on payment descriptions in tax certificates
+
+WHY: Withholding tax certificates record TAX DEDUCTIONS, not business expenses. 
+They require different accounting treatment than regular receipts.
+
+RULE #1 - TEMPLATE ENFORCEMENT:
+When template_used = true (a matching accounting template is found):
+1. You MUST use ONLY the accounts listed in template.details[]
+2. You CANNOT add any accounts beyond the template - NO EXCEPTIONS
+3. You CANNOT add tax accounts if template doesn't include them
+4. Even if the receipt shows VAT or Withholding Tax, if the template doesn't include tax accounts, DO NOT ADD THEM
+5. Template = User's explicit choice. Your job is to OBEY the template, not to apply accounting standards
+
+WHY: The user created this template to simplify accounting entries. If they wanted tax breakdown, they would have included tax accounts in the template.
+
+RULE #2 - MASTER DATA VALIDATION:
+ALL account codes MUST exist in the provided Master Data (Chart of Accounts):
+1. NEVER use account codes from your internal knowledge
+2. Each shop has different chart of accounts with different codes
+3. If template_used = true → codes come from template (already validated)
+4. If template_used = false → search Chart of Accounts, verify code exists
+5. DO NOT assume account code numbers (e.g., don't assume VAT = 115810)
+
+When template_used = false (no matching template):
+- You may use your accounting knowledge freely
+- Search for appropriate accounts in the provided Chart of Accounts
+- Verify ALL account codes exist in Master Data before using them
+
+Remember: RULE #0 (Withholding Tax) > RULE #1 (Templates) > Accounting standards
+Remember: OBEY template > Standard accounting practices
+Remember: Use ONLY account codes from provided Master Data`),
+		},
+	}
 	reqCtx.EndSubStep("")
 
 	reqCtx.StartSubStep("call_gemini_api")
 	// For multi-image analysis, we pass all OCR data as text in the prompt
 	// Images already analyzed in previous steps
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	reqCtx.LogInfo("📤 ส่งคำขอไปยัง Gemini API...")
+
+	// Retry logic for 429 errors
+	var resp *genai.GenerateContentResponse
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Apply rate limiting before EVERY API call (prevent hitting 15 RPM limit)
+		ratelimit.WaitForRateLimit()
+
+		resp, err = model.GenerateContent(ctx, genai.Text(prompt))
+		if err == nil {
+			break
+		}
+
+		// Check if it's a 429 error
+		errMsg := strings.ToLower(err.Error())
+		if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "resource exhausted") {
+			if attempt < maxRetries {
+				waitTime := time.Duration(attempt*10) * time.Second
+				reqCtx.LogWarning("⚠️  Rate limit (429), waiting %v before retry (attempt %d/%d)", waitTime, attempt, maxRetries)
+				time.Sleep(waitTime)
+				continue
+			}
+		}
+		break
+	}
+
+	reqCtx.LogInfo("📥 ได้รับ response จาก Gemini API")
 
 	if err != nil {
 		reqCtx.EndSubStep("❌ FAILED")
@@ -653,7 +887,7 @@ func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 			userMsg := buildUserFriendlyError(gemErr)
 			return "", nil, fmt.Errorf("%s (technical: %w)", userMsg, err)
 		}
-		return "", nil, fmt.Errorf("Gemini API call failed: %w", err)
+		return "", nil, fmt.Errorf("Gemini API call failed after %d attempts: %w", maxRetries, err)
 	}
 	reqCtx.EndSubStep("")
 

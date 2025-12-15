@@ -1,0 +1,721 @@
+// template_matcher.go - Smart Template Matching with AI
+//
+// ฟังก์ชัน: วิเคราะห์ raw_document_text และจับคู่กับ template ที่เหมาะสม
+// ใช้ Gemini AI เพื่อเข้าใจบริบทและจับคู่อัจฉริยะ
+
+package processor
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/bosocmputer/account_ocr_gemini/configs"
+	"github.com/bosocmputer/account_ocr_gemini/internal/common"
+	"github.com/bosocmputer/account_ocr_gemini/internal/ratelimit"
+	"github.com/google/generative-ai-go/genai"
+	"go.mongodb.org/mongo-driver/bson"
+	"google.golang.org/api/option"
+)
+
+// TemplateMatchResult เก็บผลลัพธ์การจับคู่ template
+type TemplateMatchResult struct {
+	Template        bson.M  // Template ที่ตรงที่สุด
+	Confidence      float64 // ความมั่นใจ 0-100
+	MatchedKeywords []string
+	Description     string
+	TemplateID      interface{}
+	Reason          string // เหตุผลที่เลือก template นี้
+}
+
+// aiTemplateMatchResult represents AI's template matching result (internal)
+type aiTemplateMatchResult struct {
+	MatchedTemplate string `json:"matched_template"`
+	Confidence      int    `json:"confidence"`
+	Reasoning       string `json:"reasoning"`
+}
+
+// AnalyzeTemplateMatch วิเคราะห์ raw_document_text และหา template ที่เหมาะสม
+//
+// NEW Algorithm (AI-Driven):
+// 1. ส่ง raw_document_text + template descriptions ไปให้ Gemini AI
+// 2. AI จะวิเคราะห์และเลือก template ที่เหมาะสมที่สุด
+// 3. AI ให้ confidence score และเหตุผล
+// 4. Return template ที่ AI เลือก
+func AnalyzeTemplateMatch(
+	rawDocumentText string,
+	templates []bson.M,
+	reqCtx *common.RequestContext,
+) TemplateMatchResult {
+	if len(templates) == 0 {
+		return TemplateMatchResult{
+			Confidence: 0,
+			Reason:     "ไม่มี template ในระบบ",
+		}
+	}
+
+	// Extract template descriptions for AI
+	templateDescriptions := make([]string, 0, len(templates))
+	templateMap := make(map[string]bson.M) // Map description -> template
+
+	for _, template := range templates {
+		description, ok := template["description"].(string)
+		if ok && description != "" {
+			templateDescriptions = append(templateDescriptions, description)
+			templateMap[description] = template
+		}
+	}
+
+	if len(templateDescriptions) == 0 {
+		return TemplateMatchResult{
+			Confidence: 0,
+			Reason:     "ไม่มี template description ในระบบ",
+		}
+	}
+
+	reqCtx.LogInfo("🤖 AI Template Matching: %d templates", len(templateDescriptions))
+
+	// Call Gemini AI for intelligent template matching
+	aiResult, tokenUsage, err := callGeminiForTemplateMatch(rawDocumentText, templateDescriptions, reqCtx)
+	if err != nil {
+		reqCtx.LogInfo("⚠️  AI Template Matching failed: %v", err)
+		// Fallback: return no match
+		return TemplateMatchResult{
+			Confidence: 0,
+			Reason:     fmt.Sprintf("AI matching error: %v", err),
+		}
+	}
+
+	// Log token usage
+	if tokenUsage != nil {
+		reqCtx.LogInfo("🪙 Template Matching Tokens: %d input + %d output = %d total",
+			tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.TotalTokens)
+	}
+
+	// Find the matched template from map
+	// Try exact match first
+	matchedTemplate, found := templateMap[aiResult.MatchedTemplate]
+
+	// If not found, try fuzzy matching (handle typos/variations)
+	if !found {
+		reqCtx.LogInfo("⚠️  Exact match failed for: '%s', trying fuzzy matching...", aiResult.MatchedTemplate)
+
+		// Normalize AI's response
+		aiTemplateLower := strings.ToLower(strings.TrimSpace(aiResult.MatchedTemplate))
+
+		// Try to find similar template description
+		bestSimilarity := 0.0
+		var bestTemplate bson.M
+		bestDescription := ""
+
+		for desc, tmpl := range templateMap {
+			descLower := strings.ToLower(strings.TrimSpace(desc))
+
+			// Calculate similarity
+			similarity := calculateStringSimilarity(aiTemplateLower, descLower)
+
+			// If very similar (>75%), consider it a match
+			if similarity > bestSimilarity {
+				bestSimilarity = similarity
+				bestTemplate = tmpl
+				bestDescription = desc
+			}
+		}
+
+		// Accept match if similarity > 75%
+		if bestSimilarity > 0.75 {
+			reqCtx.LogInfo("✅ Fuzzy match found: '%s' (similarity: %.1f%%)", bestDescription, bestSimilarity*100)
+			matchedTemplate = bestTemplate
+			found = true
+		} else {
+			reqCtx.LogInfo("❌ No similar template found (best: %.1f%%)", bestSimilarity*100)
+			return TemplateMatchResult{
+				Confidence: 0,
+				Reason:     fmt.Sprintf("AI เลือก template '%s' ที่ไม่พบในระบบ (similarity: %.1f%%)", aiResult.MatchedTemplate, bestSimilarity*100),
+			}
+		}
+	}
+
+	// Return AI's decision
+	bestMatch := TemplateMatchResult{
+		Template:        matchedTemplate,
+		Confidence:      float64(aiResult.Confidence),
+		MatchedKeywords: []string{}, // AI doesn't use keywords
+		Description:     aiResult.MatchedTemplate,
+		TemplateID:      matchedTemplate["_id"],
+		Reason:          aiResult.Reasoning,
+	}
+
+	if bestMatch.Confidence > 0 {
+		reqCtx.LogInfo("✅ Best Match: '%s' (%.1f%%)", bestMatch.Description, bestMatch.Confidence)
+	} else {
+		reqCtx.LogInfo("❌ No template matched")
+	}
+
+	return bestMatch
+}
+
+// calculateTemplateScore คำนวณคะแนนการจับคู่ระหว่าง document กับ template
+//
+// NEW Algorithm - AI-Driven from template.description:
+// 1. Extract keywords จาก template.description (user-defined)
+// 2. ค้นหา keywords เหล่านั้นใน document text
+// 3. คำนวณ fuzzy similarity สำหรับแต่ละ keyword
+// 4. ให้คะแนนตามความใกล้เคียง
+//
+// Scoring:
+// - Exact match: 40 points per keyword
+// - Fuzzy match (85%+): 30 points per keyword
+// - Partial match (70%+): 20 points per keyword
+// - Overall fuzzy: +20 bonus
+func calculateTemplateScore(
+	docText string,
+	templateDesc string,
+) (score float64, matchedKeywords []string, reason string) {
+	templateDesc = normalizeText(templateDesc)
+	matchedKw := []string{}
+	reasons := []string{}
+
+	// Extract keywords from template description (user-defined in MongoDB)
+	templateKeywords := extractKeywordsFromDescription(templateDesc)
+
+	if len(templateKeywords) == 0 {
+		return 0, []string{}, "no keywords in description"
+	}
+
+	// Check each keyword against document
+	keywordScores := []float64{}
+
+	for _, keyword := range templateKeywords {
+		keywordLower := strings.ToLower(keyword)
+		bestMatch := 0.0
+
+		// Method 1: Exact match
+		if strings.Contains(docText, keywordLower) {
+			score += 40
+			matchedKw = append(matchedKw, keyword)
+			reasons = append(reasons, fmt.Sprintf("exact:%s", keyword))
+			keywordScores = append(keywordScores, 1.0)
+			continue
+		}
+
+		// Method 2: Fuzzy match - ค้นหาคำที่ใกล้เคียงใน document
+		docWords := strings.Fields(docText)
+		for _, docWord := range docWords {
+			if len(docWord) < 2 {
+				continue
+			}
+
+			// Calculate similarity
+			similarity := calculateFuzzyMatch(keywordLower, docWord)
+
+			if similarity > bestMatch {
+				bestMatch = similarity
+			}
+
+			// Stop if found very good match
+			if similarity > 0.9 {
+				break
+			}
+		}
+
+		// Score based on best match
+		if bestMatch >= 0.85 {
+			score += 30
+			matchedKw = append(matchedKw, keyword)
+			reasons = append(reasons, fmt.Sprintf("fuzzy:%s(%.0f%%)", keyword, bestMatch*100))
+			keywordScores = append(keywordScores, bestMatch)
+		} else if bestMatch >= 0.7 {
+			score += 20
+			matchedKw = append(matchedKw, keyword)
+			reasons = append(reasons, fmt.Sprintf("partial:%s(%.0f%%)", keyword, bestMatch*100))
+			keywordScores = append(keywordScores, bestMatch)
+		}
+	}
+
+	// Bonus: Overall text similarity (ถ้า description สั้น เช่น "ค่าน้ำมัน")
+	if len(templateDesc) < 50 {
+		overallSimilarity := 0.0
+		templateWords := strings.Fields(templateDesc)
+
+		for _, tmplWord := range templateWords {
+			if len(tmplWord) < 2 {
+				continue
+			}
+
+			if strings.Contains(docText, tmplWord) {
+				overallSimilarity += 1.0
+			} else {
+				// Check fuzzy
+				docWords := strings.Fields(docText)
+				for _, docWord := range docWords {
+					sim := calculateFuzzyMatch(tmplWord, docWord)
+					if sim > overallSimilarity {
+						overallSimilarity = sim
+					}
+				}
+			}
+		}
+
+		if overallSimilarity > 0.8 && len(templateWords) > 0 {
+			bonus := 20.0 * (overallSimilarity / float64(len(templateWords)))
+			score += bonus
+			reasons = append(reasons, fmt.Sprintf("bonus:+%.0f", bonus))
+		}
+	}
+
+	// Cap at 100
+	if score > 100 {
+		score = 100
+	}
+
+	finalReason := strings.Join(reasons, ", ")
+	if finalReason == "" {
+		finalReason = "no match"
+	}
+
+	return score, matchedKw, finalReason
+}
+
+// contains helper function
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// calculateFuzzyMatch คำนวณความคล้ายกันด้วย Levenshtein Distance
+// Return: similarity score 0.0-1.0
+func calculateFuzzyMatch(text1, text2 string) float64 {
+	// ถ้าข้อความยาวมาก ให้ตัดเอาส่วนที่สำคัญ
+	if len(text1) > 200 {
+		text1 = text1[:200]
+	}
+	if len(text2) > 200 {
+		text2 = text2[:200]
+	}
+
+	distance := levenshteinDistance(text1, text2)
+	maxLen := float64(max(len(text1), len(text2)))
+
+	if maxLen == 0 {
+		return 0
+	}
+
+	similarity := 1.0 - (float64(distance) / maxLen)
+	return math.Max(0, similarity)
+}
+
+// levenshteinDistance คำนวณ edit distance ระหว่าง 2 strings
+// Algorithm: Dynamic Programming
+func levenshteinDistance(s1, s2 string) int {
+	len1 := len(s1)
+	len2 := len(s2)
+
+	// Create matrix
+	matrix := make([][]int, len1+1)
+	for i := range matrix {
+		matrix[i] = make([]int, len2+1)
+	}
+
+	// Initialize first row and column
+	for i := 0; i <= len1; i++ {
+		matrix[i][0] = i
+	}
+	for j := 0; j <= len2; j++ {
+		matrix[0][j] = j
+	}
+
+	// Fill matrix
+	for i := 1; i <= len1; i++ {
+		for j := 1; j <= len2; j++ {
+			cost := 0
+			if s1[i-1] != s2[j-1] {
+				cost = 1
+			}
+
+			matrix[i][j] = min(
+				matrix[i-1][j]+1,      // deletion
+				matrix[i][j-1]+1,      // insertion
+				matrix[i-1][j-1]+cost, // substitution
+			)
+		}
+	}
+
+	return matrix[len1][len2]
+}
+
+// calculateSemanticMatch คำนวณคะแนนจากความหมายที่เกี่ยวข้อง
+// เช่น "น้ำมัน" กับ "เชื้อเพลิง", "ไฟฟ้า" กับ "พลังงาน"
+func calculateSemanticMatch(keywords []string, templateDesc string) float64 {
+	// Semantic pairs (คำที่มีความหมายเกี่ยวข้อง)
+	semanticPairs := map[string][]string{
+		"น้ำมัน":       {"เชื้อเพลิง", "ดีเซล", "เบนซิน", "น้ำมัน"},
+		"ไฟฟ้า":        {"พลังงาน", "ค่าไฟ", "electricity"},
+		"อินเตอร์เน็ต": {"internet", "เน็ต", "บรอดแบนด์"},
+		"ทำบัญชี":      {"บัญชี", "accounting", "ที่ปรึกษา"},
+		"เงินเดือน":    {"ค่าจ้าง", "salary", "wage"},
+		"ค่าเช่า":      {"เช่า", "rent", "rental"},
+	}
+
+	score := 0.0
+	for _, keyword := range keywords {
+		if relatedWords, exists := semanticPairs[keyword]; exists {
+			for _, related := range relatedWords {
+				if strings.Contains(templateDesc, related) {
+					score += 10
+					break
+				}
+			}
+		}
+	}
+
+	return score
+}
+
+// containsPartial ตรวจสอบว่ามี substring ที่ใกล้เคียงหรือไม่
+func containsPartial(text, keyword string, threshold float64) bool {
+	if len(keyword) < 3 {
+		return false
+	}
+
+	// Split text into words
+	words := strings.Fields(text)
+	for _, word := range words {
+		if len(word) < 3 {
+			continue
+		}
+
+		// Calculate similarity
+		similarity := calculateFuzzyMatch(word, keyword)
+		if similarity >= threshold {
+			return true
+		}
+	}
+
+	return false
+}
+
+// extractKeywordsFromDescription สกัดคำสำคัญจาก template description
+// ไม่ใช้ hardcoded keywords - ให้ AI-driven โดยดูจาก description จริง
+func extractKeywordsFromDescription(description string) []string {
+	// Normalize
+	description = normalizeText(description)
+
+	// Split into words and filter meaningful ones (length >= 2)
+	words := strings.Fields(description)
+	keywords := []string{}
+
+	// Stop words ที่ไม่สำคัญ (common Thai words)
+	stopWords := map[string]bool{
+		"การ": true, "ของ": true, "ที่": true, "จาก": true,
+		"และ": true, "หรือ": true, "กับ": true, "ใน": true,
+		"บริษัท": true, "จำกัด": true, "มหาชน": true,
+		"ค่า": true, "เป็น": true, "มี": true, "ได้": true,
+		"ไป": true, "มา": true, "ให้": true, "แล้ว": true,
+	}
+
+	for _, word := range words {
+		// Skip short words and stop words
+		if len(word) < 2 || stopWords[word] {
+			continue
+		}
+
+		// Keep meaningful words
+		keywords = append(keywords, word)
+	}
+
+	return keywords
+}
+
+// normalizeText ทำให้ข้อความเป็นมาตรฐาน (lowercase, remove extra spaces)
+func normalizeText(text string) string {
+	// Convert to lowercase
+	text = strings.ToLower(text)
+
+	// Remove extra whitespace
+	text = strings.Join(strings.Fields(text), " ")
+
+	// Remove non-alphanumeric (except Thai)
+	result := strings.Builder{}
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || unicode.IsSpace(r) {
+			result.WriteRune(r)
+		}
+	}
+
+	return result.String()
+}
+
+// callGeminiForTemplateMatch calls Gemini AI for intelligent template matching
+// Moved from ai package to avoid import cycle
+func callGeminiForTemplateMatch(documentText string, templateDescriptions []string, reqCtx *common.RequestContext) (*aiTemplateMatchResult, *common.TokenUsage, error) {
+	// Step 1: Initialize the Gemini client
+	ctx := context.Background()
+	client, err := genai.NewClient(ctx, option.WithAPIKey(configs.GEMINI_API_KEY))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create Gemini client: %w", err)
+	}
+	defer client.Close()
+
+	model := client.GenerativeModel(configs.MODEL_NAME)
+
+	// Step 2: Define the JSON schema for template matching
+	schema := createTemplateMatchSchemaLocal()
+
+	// Step 3: Configure the model with JSON response
+	model.ResponseMIMEType = "application/json"
+	model.ResponseSchema = schema
+
+	// Step 4: Build the prompt
+	prompt := getTemplateMatchingPromptLocal(documentText, templateDescriptions)
+
+	// Step 5: Call Gemini API with retry logic for 429 errors
+	// Apply rate limiting to prevent 429 errors
+	ratelimit.WaitForRateLimit()
+	reqCtx.LogInfo("📤 ส่งคำขอ Template Matching ไปยัง Gemini AI...")
+
+	// Retry up to 3 times with exponential backoff for 429 errors
+	var resp *genai.GenerateContentResponse
+	maxRetries := 3
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, err = model.GenerateContent(ctx, genai.Text(prompt))
+		if err == nil {
+			break
+		}
+
+		// Check if it's a 429 error
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "Resource exhausted") {
+			if attempt < maxRetries {
+				waitTime := time.Duration(attempt*10) * time.Second
+				reqCtx.LogWarning("⚠️  Rate limit (429), waiting %v before retry (attempt %d/%d)", waitTime, attempt, maxRetries)
+				time.Sleep(waitTime)
+				continue
+			}
+		}
+		break
+	}
+
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate content after %d attempts: %w", maxRetries, err)
+	}
+	reqCtx.LogInfo("📥 ได้รับ response จาก Gemini AI")
+
+	// Extract the JSON response
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return nil, nil, fmt.Errorf("no response from Gemini API")
+	}
+
+	// Get the text response
+	var jsonResponse string
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if text, ok := part.(genai.Text); ok {
+			jsonResponse = string(text)
+			break
+		}
+	}
+
+	if jsonResponse == "" {
+		return nil, nil, fmt.Errorf("empty response from Gemini API")
+	}
+
+	// Step 6: Unmarshal the JSON into aiTemplateMatchResult struct
+	var result aiTemplateMatchResult
+	if err := json.Unmarshal([]byte(jsonResponse), &result); err != nil {
+		// Log the problematic JSON response for debugging
+		preview := jsonResponse
+		if len(preview) > 300 {
+			preview = preview[:300] + "... (truncated)"
+		}
+		reqCtx.LogInfo("⚠️  Failed to parse template match JSON. Preview: %s", preview)
+		return nil, nil, fmt.Errorf("failed to unmarshal JSON response: %w", err)
+	}
+
+	// Step 7: Extract token usage
+	var tokenUsage *common.TokenUsage
+	if resp.UsageMetadata != nil {
+		tokens := common.CalculateTokenCost(
+			int(resp.UsageMetadata.PromptTokenCount),
+			int(resp.UsageMetadata.CandidatesTokenCount),
+		)
+		tokenUsage = &tokens
+	}
+
+	reqCtx.LogInfo("✅ AI Template Matching: '%s' (%d%%) - %s", result.MatchedTemplate, result.Confidence, result.Reasoning)
+
+	return &result, tokenUsage, nil
+}
+
+// getTemplateMatchingPromptLocal creates a prompt for AI-based template matching (local copy to avoid import cycle)
+func getTemplateMatchingPromptLocal(documentText string, templateDescriptions []string) string {
+	prompt := `
+คุณคือผู้เชี่ยวชาญด้านการจับคู่เอกสารบัญชี
+
+🎯 **งานของคุณ: วิเคราะห์เอกสารและหา Template ที่ตรงที่สุด**
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📄 ข้อความจากเอกสาร (OCR)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+` + documentText + `
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 Template ทางบัญชีที่มีในระบบ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+`
+
+	for i, desc := range templateDescriptions {
+		prompt += fmt.Sprintf("%d. %s\n", i+1, desc)
+	}
+
+	prompt += `
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🧠 วิธีการวิเคราะห์
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+**ขั้นตอนที่ 1: ทำความเข้าใจเอกสาร**
+- อ่านเอกสารทั้งหมด
+- ดูชื่อร้าน/บริษัทผู้ออกเอกสาร
+- ดูประเภทสินค้า/บริการที่ซื้อ
+- ดูคำสำคัญในเอกสาร
+
+**ขั้นตอนที่ 2: เปรียบเทียบกับ Template**
+- ดู description ของแต่ละ template
+- หาความเกี่ยวข้องระหว่างเอกสารกับ template description
+- ใช้ความรู้ทางบัญชีและธุรกิจในการตัดสิน
+
+**ตัวอย่างการวิเคราะห์:**
+
+✅ ถ้าเอกสารมี:
+  - "เบนซิน", "ดีเซล", "แก๊สโซฮอล์", "ปั๊ม", "ลิตร"
+  - ชื่อบริษัทน้ำมัน: "ปตท", "บางจาก", "เชลล์", "เอสโซ่"
+  → ตรงกับ: **"ค่าน้ำมัน"** (90-100%)
+
+✅ ถ้าเอกสารมี:
+  - "การไฟฟ้า", "หน่วย", "kWh", "PEA", "MEA"
+  - "ค่าไฟ", "เลขมิเตอร์"
+  → ตรงกับ: **"ค่าไฟฟ้า"** (90-100%)
+
+⚠️ **สำคัญ:**
+- ให้คะแนน confidence 0-100%
+- ต่ำกว่า 60% = ไม่แน่ใจ (ควรใช้ full mode)
+- 60-84% = ค่อนข้างแน่ใจ (แต่ยังไม่ผ่านเกณฑ์)
+- 85-100% = แน่ใจมาก (ใช้ template-only mode ได้)
+- ถ้าไม่มี template ไหนเข้าข่าย ให้เลือก "ค่าใช้จ่ายเบ็ดเตล็ด" แทน
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📤 ตอบกลับ
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ให้ตอบเป็น JSON format:
+- matched_template: ชื่อ template ที่ตรงที่สุด (string)
+- confidence: ความมั่นใจ 0-100 (integer)
+- reasoning: เหตุผลที่เลือก template นี้ (string, สั้นๆ ภาษาไทย)
+`
+
+	return prompt
+}
+
+// createTemplateMatchSchemaLocal creates the JSON schema for AI template matching (local copy to avoid import cycle)
+func createTemplateMatchSchemaLocal() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"matched_template": {
+				Type:        genai.TypeString,
+				Description: "ชื่อ template ที่ตรงที่สุดกับเอกสาร (ต้องตรงกับ description ที่ให้มาเท่านั้น)",
+			},
+			"confidence": {
+				Type:        genai.TypeInteger,
+				Description: "ความมั่นใจ 0-100 (ต่ำกว่า 60 = ไม่แน่ใจ, 60-84 = ค่อนข้างแน่ใจ, 85-100 = แน่ใจมาก)",
+			},
+			"reasoning": {
+				Type:        genai.TypeString,
+				Description: "เหตุผลที่เลือก template นี้ (สั้นๆ ภาษาไทย)",
+			},
+		},
+		Required: []string{"matched_template", "confidence", "reasoning"},
+	}
+}
+
+// Helper functions
+func min(a, b, c int) int {
+	if a < b {
+		if a < c {
+			return a
+		}
+		return c
+	}
+	if b < c {
+		return b
+	}
+	return c
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// calculateStringSimilarity calculates similarity between two strings (0.0 - 1.0)
+// Uses a combination of:
+// 1. Exact substring matching (keywords overlap)
+// 2. Length similarity
+// 3. Common word ratio
+func calculateStringSimilarity(s1, s2 string) float64 {
+	if s1 == s2 {
+		return 1.0
+	}
+
+	// Tokenize into words
+	words1 := strings.Fields(s1)
+	words2 := strings.Fields(s2)
+
+	if len(words1) == 0 || len(words2) == 0 {
+		return 0.0
+	}
+
+	// Count common words
+	commonCount := 0
+	for _, w1 := range words1 {
+		for _, w2 := range words2 {
+			if w1 == w2 {
+				commonCount++
+				break
+			}
+		}
+	}
+
+	// Calculate Jaccard similarity (intersection / union)
+	totalWords := len(words1) + len(words2) - commonCount
+	if totalWords == 0 {
+		return 0.0
+	}
+
+	jaccardSim := float64(commonCount) / float64(totalWords)
+
+	// Bonus for substring containment
+	containmentBonus := 0.0
+	if strings.Contains(s1, s2) || strings.Contains(s2, s1) {
+		containmentBonus = 0.2
+	}
+
+	// Combine scores
+	similarity := jaccardSim + containmentBonus
+	if similarity > 1.0 {
+		similarity = 1.0
+	}
+
+	return similarity
+}

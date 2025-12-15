@@ -7,6 +7,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/google/uuid"
 )
 
@@ -52,14 +53,9 @@ type TokenUsage struct {
 	CostTHB      float64 `json:"cost_thb"`
 }
 
-// Exchange rate: 1 USD = 36 THB
-const USD_TO_THB = 36.0
-
-// Gemini 2.5 Flash pricing (per 1M tokens)
-const (
-	INPUT_TOKEN_PRICE_PER_MILLION  = 0.30 // $0.30 / 1M input tokens
-	OUTPUT_TOKEN_PRICE_PER_MILLION = 2.50 // $2.50 / 1M output tokens
-)
+// Pricing is now loaded from configs package to support different models
+// Gemini 2.5 Flash-Lite: Input=$0.10, Output=$0.40
+// Gemini 2.5 Flash: Input=$0.30, Output=$2.50
 
 // NewRequestContext creates a new request tracking context
 func NewRequestContext(shopID string) *RequestContext {
@@ -147,11 +143,11 @@ func (rc *RequestContext) EndStep(status string, tokens *TokenUsage, err error) 
 func CalculateTokenCost(inputTokens, outputTokens int) TokenUsage {
 	totalTokens := inputTokens + outputTokens
 
-	// Calculate cost based on Gemini 2.5 Flash pricing
-	inputCost := float64(inputTokens) * INPUT_TOKEN_PRICE_PER_MILLION / 1_000_000
-	outputCost := float64(outputTokens) * OUTPUT_TOKEN_PRICE_PER_MILLION / 1_000_000
+	// Calculate cost based on pricing from config (supports different models)
+	inputCost := float64(inputTokens) * configs.GEMINI_INPUT_PRICE_PER_MILLION / 1_000_000
+	outputCost := float64(outputTokens) * configs.GEMINI_OUTPUT_PRICE_PER_MILLION / 1_000_000
 	costUSD := inputCost + outputCost
-	costTHB := costUSD * USD_TO_THB
+	costTHB := costUSD * configs.USD_TO_THB
 
 	return TokenUsage{
 		InputTokens:  inputTokens,

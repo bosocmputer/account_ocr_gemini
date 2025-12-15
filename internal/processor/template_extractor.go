@@ -11,7 +11,7 @@ import (
 
 // ExtractTemplateInfo analyzes AI response to determine if a template was used
 // and extracts relevant information about the template selection
-func ExtractTemplateInfo(accountingResponse map[string]interface{}, documentTemplates []bson.M, reqCtx *common.RequestContext) map[string]interface{} {
+func ExtractTemplateInfo(accountingResponse map[string]interface{}, documentTemplates []bson.M, matchedTemplate *bson.M, reqCtx *common.RequestContext) map[string]interface{} {
 	// Try to get AI explanation from validation
 	validation, ok := accountingResponse["validation"].(map[string]interface{})
 	if !ok {
@@ -29,55 +29,117 @@ func ExtractTemplateInfo(accountingResponse map[string]interface{}, documentTemp
 		}
 	}
 
-	reasoning, ok := aiExplanation["reasoning"].(string)
-	if !ok || reasoning == "" {
-		return map[string]interface{}{
-			"template_used": false,
-			"reason":        "ไม่มี reasoning จาก AI",
+	// Get reasoning for template matching
+	reasoning, _ := aiExplanation["reasoning"].(string)
+
+	// 🔥 PRIORITY 1: Check matchedTemplate first (most reliable source)
+	if matchedTemplate != nil {
+		// Get template description from matchedTemplate
+		templateDesc := ""
+		if desc, ok := (*matchedTemplate)["description"].(string); ok {
+			templateDesc = strings.TrimSpace(desc)
 		}
+
+		if templateDesc == "" {
+			// Fallback: use name if description is empty
+			if name, ok := (*matchedTemplate)["name"].(string); ok {
+				templateDesc = strings.TrimSpace(name)
+			}
+		}
+
+		// Get template details from AI response
+		templateDetails := ""
+		accountSelectionLogic, _ := aiExplanation["account_selection_logic"].(map[string]interface{})
+		if td, ok := accountSelectionLogic["template_details"].(string); ok {
+			templateDetails = td
+		}
+
+		reqCtx.LogInfo("✅ ใช้เทมเพลต: '%s' (จาก Template Matcher)", templateDesc)
+		return extractTemplateAccounts(*matchedTemplate, templateDesc, templateDetails, reqCtx)
 	}
 
-	// Check if template was mentioned (in Thai or English)
-	templateMentioned := strings.Contains(reasoning, "เทมเพลต") ||
-		strings.Contains(reasoning, "template") ||
-		strings.Contains(reasoning, "Template")
-
-	if !templateMentioned {
-		reqCtx.LogInfo("ℹ️  ไม่พบการใช้เทมเพลต - AI วิเคราะห์จาก Master Data")
-		return map[string]interface{}{
-			"template_used": false,
-			"reason":        "ไม่พบเทมเพลตที่ตรงกัน AI วิเคราะห์ตาม Master Data",
+	// 🔥 PRIORITY 2: Check account_selection_logic.template_used from AI
+	accountSelectionLogic, ok := aiExplanation["account_selection_logic"].(map[string]interface{})
+	if ok {
+		// Support both bool and string type for template_used
+		templateUsed := false
+		if tu, ok := accountSelectionLogic["template_used"].(bool); ok {
+			templateUsed = tu
+		} else if tuStr, ok := accountSelectionLogic["template_used"].(string); ok {
+			templateUsed = (tuStr == "true")
 		}
-	}
 
-	// Template was used - find which one
-	templateDesc := ""
-	var matchedTemplate bson.M
+		if !templateUsed {
+			reqCtx.LogInfo("ℹ️  AI ระบุชัดเจน: template_used = false (ไม่ใช้เทมเพลต)")
+			templateDetails := ""
+			if td, ok := accountSelectionLogic["template_details"].(string); ok {
+				templateDetails = td
+			}
+			return map[string]interface{}{
+				"template_used": false,
+				"reason":        templateDetails,
+				"note":          "AI วิเคราะห์จาก Master Data เท่านั้น ไม่ใช้เทมเพลต",
+			}
+		}
 
-	for _, template := range documentTemplates {
-		if desc, ok := template["description"].(string); ok && desc != "" {
-			if strings.Contains(reasoning, desc) {
-				templateDesc = desc
-				matchedTemplate = template
-				break
+		// Template was definitely used (templateUsed = true) - get details
+		// template_details can be string or array - handle both
+		templateDetails := ""
+		if td, ok := accountSelectionLogic["template_details"].(string); ok {
+			templateDetails = td
+		} else if tdArray, ok := accountSelectionLogic["template_details"].([]interface{}); ok {
+			// If it's an array, extract account codes
+			reqCtx.LogInfo("📋 AI ส่ง template_details เป็น array (ใช้เทมเพลตครบถ้วน)")
+			// Convert array to a summary string if needed
+			if len(tdArray) > 0 {
+				templateDetails = "ใช้บัญชีจาก template ครบถ้วน"
+			}
+		}
+
+		// Fallback: Try to find matching template by searching in reasoning/templateDetails
+		templateDesc := ""
+		var foundTemplate bson.M
+
+		for _, template := range documentTemplates {
+			if desc, ok := template["description"].(string); ok && desc != "" {
+				descTrimmed := strings.TrimSpace(desc)
+				if strings.Contains(reasoning, descTrimmed) || strings.Contains(templateDetails, descTrimmed) {
+					templateDesc = descTrimmed
+					foundTemplate = template
+					break
+				}
+			}
+		}
+
+		if templateDesc != "" {
+			reqCtx.LogInfo("📋 AI เลือกใช้เทมเพลต (หาจาก reasoning): '%s' (Confidence: 99%%)", templateDesc)
+			return extractTemplateAccounts(foundTemplate, templateDesc, templateDetails, reqCtx)
+		}
+
+		// Last resort: AI says template used but we can't find it
+		if templateDetails != "" {
+			reqCtx.LogWarning("⚠️  AI ระบุใช้เทมเพลตแต่ไม่พบ template ที่ตรงกัน")
+			return map[string]interface{}{
+				"template_used":    true,
+				"template_name":    templateDetails,
+				"selection_reason": "ไม่พบ template ที่ตรงกัน",
+				"confidence":       99,
 			}
 		}
 	}
 
-	if templateDesc == "" {
-		// Template mentioned but couldn't identify which one
-		reqCtx.LogWarning("⚠️  AI กล่าวถึงเทมเพลตแต่ไม่พบชื่อที่ตรงกัน")
-		return map[string]interface{}{
-			"template_used":    true,
-			"template_name":    "ไม่ระบุ",
-			"selection_reason": extractShortReason(reasoning),
-			"confidence":       85,
-		}
+	// Fallback: If account_selection_logic doesn't have template_used field
+	// assume no template was used (safer default)
+	reqCtx.LogWarning("⚠️  ไม่พบ template_used ใน account_selection_logic - สันนิษฐานว่าไม่ใช้เทมเพลต")
+	return map[string]interface{}{
+		"template_used": false,
+		"reason":        "ไม่พบข้อมูล template_used จาก AI - วิเคราะห์จาก Master Data",
+		"note":          "AI response อาจมีรูปแบบไม่สมบูรณ์",
 	}
+}
 
-	// Successfully identified template
-	reqCtx.LogInfo("📋 AI เลือกใช้เทมเพลต: '%s' (Confidence: 99%%)", templateDesc)
-
+// extractTemplateAccounts extracts account information from matched template
+func extractTemplateAccounts(matchedTemplate bson.M, templateDesc string, selectionReason string, reqCtx *common.RequestContext) map[string]interface{} {
 	// Extract accounts used from template details
 	accountsUsed := []map[string]interface{}{}
 
@@ -128,7 +190,7 @@ func ExtractTemplateInfo(accountingResponse map[string]interface{}, documentTemp
 		"template_name":    templateDesc,
 		"template_id":      matchedTemplate["_id"],
 		"accounts_used":    accountsUsed,
-		"selection_reason": extractShortReason(reasoning),
+		"selection_reason": selectionReason,
 		"confidence":       99,
 		"note":             "AI วิเคราะห์แล้วพบว่าใบเสร็จตรงกับเทมเพลตที่กำหนดไว้",
 	}

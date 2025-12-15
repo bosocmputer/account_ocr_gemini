@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/bosocmputer/account_ocr_gemini/internal/common"
+	"github.com/bosocmputer/account_ocr_gemini/internal/ratelimit"
 	"github.com/google/generative-ai-go/genai"
 	"google.golang.org/api/googleapi"
 )
@@ -23,9 +24,9 @@ type RetryConfig struct {
 
 // DefaultRetryConfig provides sensible defaults for retry behavior
 var DefaultRetryConfig = RetryConfig{
-	MaxAttempts:     3,
-	InitialDelay:    1 * time.Second,
-	MaxDelay:        8 * time.Second,
+	MaxAttempts:     3,                // 3 attempts total
+	InitialDelay:    2 * time.Second,  // Start with 2s (increased from 1s)
+	MaxDelay:        60 * time.Second, // Max 60s for rate limit (increased from 8s)
 	BackoffMultiple: 2.0,
 }
 
@@ -87,7 +88,7 @@ func categorizeGeminiError(err error) *GeminiError {
 
 		case 429:
 			geminiErr.Category = "rate_limit"
-			geminiErr.Message = "Rate limit exceeded - too many requests"
+			geminiErr.Message = "Rate limit exceeded - too many requests (wait 10-60 seconds)"
 			geminiErr.Retryable = true
 
 		case 500, 502, 503, 504:
@@ -121,6 +122,14 @@ func categorizeGeminiError(err error) *GeminiError {
 
 	// Check error message for common patterns
 	errMsg := strings.ToLower(err.Error())
+
+	// Check for 429 rate limit in error message (when not caught as googleapi.Error)
+	if strings.Contains(errMsg, "429") || strings.Contains(errMsg, "resource exhausted") {
+		geminiErr.Category = "rate_limit"
+		geminiErr.Message = "Rate limit exceeded - too many requests (wait 10-60 seconds)"
+		geminiErr.Retryable = true
+		return geminiErr
+	}
 
 	if strings.Contains(errMsg, "quota") || strings.Contains(errMsg, "limit") {
 		geminiErr.Category = "quota_exceeded"
@@ -162,13 +171,18 @@ func callGeminiWithRetry(
 	var lastGeminiErr *GeminiError
 
 	for attempt := 1; attempt <= config.MaxAttempts; attempt++ {
+		// Apply rate limiting before EVERY API call (prevent hitting 15 RPM limit)
+		ratelimit.WaitForRateLimit()
+
 		// Log attempt
 		if attempt > 1 {
 			reqCtx.LogInfo("Retry attempt %d/%d", attempt, config.MaxAttempts)
 		}
 
 		// Make API call
+		reqCtx.LogInfo("📤 ส่งคำขอไปยัง Gemini API (attempt %d)...", attempt)
 		resp, err := model.GenerateContent(ctx, prompt, image)
+		reqCtx.LogInfo("📥 ได้รับ response จาก Gemini API")
 
 		// Success!
 		if err == nil {
@@ -198,10 +212,15 @@ func callGeminiWithRetry(
 		// Calculate delay with exponential backoff
 		delay := calculateBackoff(attempt, config)
 
-		// Special case: rate limit - use longer delay
+		// Special case: rate limit - use much longer delay (30-90 seconds)
 		if lastGeminiErr.Category == "rate_limit" {
-			delay = delay * 2
-			reqCtx.LogWarning("Rate limit hit, waiting %v before retry", delay)
+			// Gemini free tier: 15 RPM → need to wait ~30-90 seconds when rate limited
+			// Increased from 10s to 30s because Gemini blocks 60-120s after 429 error
+			delay = 30 * time.Second * time.Duration(attempt)
+			if delay > 90*time.Second {
+				delay = 90 * time.Second
+			}
+			reqCtx.LogWarning("⚠️  Rate limit hit (429), waiting %v before retry (attempt %d/%d)", delay, attempt, config.MaxAttempts)
 		} else {
 			reqCtx.LogInfo("Waiting %v before retry", delay)
 		}

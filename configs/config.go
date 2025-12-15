@@ -15,6 +15,11 @@ var (
 	GEMINI_API_KEY string
 	MODEL_NAME     string
 
+	// Gemini Pricing Configuration (per 1M tokens in USD)
+	GEMINI_INPUT_PRICE_PER_MILLION  float64
+	GEMINI_OUTPUT_PRICE_PER_MILLION float64
+	USD_TO_THB                      float64
+
 	// Server Configuration
 	PORT            string
 	UPLOAD_DIR      string
@@ -57,6 +62,12 @@ func LoadConfig() {
 
 	// Optional with defaults
 	MODEL_NAME = getEnv("MODEL_NAME", "gemini-2.5-flash")
+
+	// Gemini Pricing (default to Flash-Lite pricing)
+	GEMINI_INPUT_PRICE_PER_MILLION = getEnvFloat("GEMINI_INPUT_PRICE_PER_MILLION", 0.10)
+	GEMINI_OUTPUT_PRICE_PER_MILLION = getEnvFloat("GEMINI_OUTPUT_PRICE_PER_MILLION", 0.40)
+	USD_TO_THB = getEnvFloat("USD_TO_THB", 36.0)
+
 	PORT = getEnv("PORT", "8080")
 	UPLOAD_DIR = getEnv("UPLOAD_DIR", "uploads")
 	ALLOWED_ORIGINS = getEnv("ALLOWED_ORIGINS", "*")
@@ -100,6 +111,15 @@ func getEnvBool(key string, defaultValue bool) bool {
 func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if parsed, err := strconv.Atoi(value); err == nil {
+			return parsed
+		}
+	}
+	return defaultValue
+}
+
+func getEnvFloat(key string, defaultValue float64) float64 {
+	if value := os.Getenv(key); value != "" {
+		if parsed, err := strconv.ParseFloat(value, 64); err == nil {
 			return parsed
 		}
 	}

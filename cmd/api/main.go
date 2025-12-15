@@ -68,8 +68,8 @@ func main() {
 	srv := &http.Server{
 		Addr:           ":" + configs.PORT,
 		Handler:        router,
-		ReadTimeout:    10 * time.Second,
-		WriteTimeout:   3 * time.Minute, // Allow up to 3 minutes for long-running requests
+		ReadTimeout:    3 * time.Second,
+		WriteTimeout:   3 * time.Minute, // Allow up to 3 minutes for AI processing
 		MaxHeaderBytes: 1 << 20,
 	}
 

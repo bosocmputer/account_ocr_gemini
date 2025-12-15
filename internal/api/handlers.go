@@ -20,6 +20,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -46,6 +47,63 @@ type FailedImageInfo struct {
 	ImageIndex        int                 `json:"image_index"`
 	ImageURI          string              `json:"imageuri"`
 	Issues            []ImageQualityIssue `json:"issues"`
+}
+
+// extractNameFromNamesArray extracts name from names array (for creditors/debtors)
+// Same logic as ShopProfile.GetCompanyName() - prioritize Thai name, fallback to first active name
+func extractNameFromNamesArray(doc bson.M) string {
+	namesField, exists := doc["names"]
+	if !exists {
+		return ""
+	}
+
+	// Try multiple type assertions for MongoDB compatibility
+	var names []interface{}
+
+	// Try []interface{} (standard)
+	if n, ok := namesField.([]interface{}); ok {
+		names = n
+	} else if n, ok := namesField.(bson.A); ok {
+		// MongoDB sometimes returns bson.A instead of []interface{}
+		names = []interface{}(n)
+	} else {
+		return ""
+	}
+
+	if len(names) == 0 {
+		return ""
+	}
+
+	// Try to find Thai name first
+	for _, nameInterface := range names {
+		nameMap, ok := nameInterface.(bson.M)
+		if !ok {
+			continue
+		}
+		code, _ := nameMap["code"].(string)
+		isDelete, _ := nameMap["isdelete"].(bool)
+		name, _ := nameMap["name"].(string)
+
+		if code == "th" && !isDelete && name != "" {
+			return name
+		}
+	}
+
+	// Fallback to first non-deleted name
+	for _, nameInterface := range names {
+		nameMap, ok := nameInterface.(bson.M)
+		if !ok {
+			continue
+		}
+		isDelete, _ := nameMap["isdelete"].(bool)
+		name, _ := nameMap["name"].(string)
+
+		if !isDelete && name != "" {
+			return name
+		}
+	}
+
+	return ""
 }
 
 // PassedImageInfo contains details about an image that passed quality checks
@@ -195,6 +253,9 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		return
 	}
 
+	// Check for debug mode from query parameter
+	debugMode := c.Query("debug") == "true"
+
 	// Validate shopid
 	if req.ShopID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -213,6 +274,9 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 
 	// Create request context for tracking
 	reqCtx := common.NewRequestContext(req.ShopID)
+
+	// Log request received with ID for tracking
+	reqCtx.LogInfo("🚀 เริ่มรับคำขอใหม่ | ShopID: %s | เวลา: %s", req.ShopID, time.Now().Format("15:04:05"))
 
 	// ⚡ VALIDATE MASTER DATA FIRST (before any AI processing)
 	// This saves tokens and processing time if master data is missing
@@ -251,6 +315,20 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	reqCtx.LogInfo("✓ Master data validated: %d accounts, %d journal books, %d creditors, %d debtors",
 		len(masterCache.Accounts), len(masterCache.JournalBooks), len(masterCache.Creditors), len(masterCache.Debtors))
 
+	// 🔍 DEBUG: Show Creditors details
+	reqCtx.LogInfo("📋 Creditors List:")
+	for i, creditor := range masterCache.Creditors {
+		code := ""
+		name := ""
+		if c, ok := creditor["code"].(string); ok {
+			code = c
+		}
+		if n := extractNameFromNamesArray(creditor); n != "" {
+			name = n
+		}
+		reqCtx.LogInfo("  %d. Code: %s | Name: %s", i+1, code, name)
+	}
+
 	// ⚡ FETCH DOCUMENT FORMATE TEMPLATES (accounting patterns)
 	// This provides AI with predefined accounting entry templates for consistency
 	documentTemplates, err := FetchDocumentFormate(req.ShopID)
@@ -260,6 +338,24 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		documentTemplates = []bson.M{}
 	}
 	reqCtx.LogInfo("✓ Document templates loaded: %d templates found", len(documentTemplates))
+
+	// 🔍 DEBUG: Show Templates details
+	reqCtx.LogInfo("📋 Document Templates List:")
+	for i, tmpl := range documentTemplates {
+		id := ""
+		name := ""
+		desc := ""
+		if objID, ok := tmpl["_id"].(primitive.ObjectID); ok {
+			id = objID.Hex()
+		}
+		if n, ok := tmpl["name"].(string); ok {
+			name = n
+		}
+		if d, ok := tmpl["description"].(string); ok {
+			desc = d
+		}
+		reqCtx.LogInfo("  %d. ID: %s | Name: %s | Desc: %s", i+1, id, name, desc)
+	}
 
 	// Setup timeout context (5 minutes max for very complex receipts)
 	// Note: Complex receipts with many items can take 2-3 minutes
@@ -363,32 +459,29 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		}
 	}()
 
-	// Step 3: Process full OCR for ALL images (Phase 1 Quick OCR removed for performance)
-	reqCtx.StartStep("full_ocr_extraction_all")
-	reqCtx.LogInfo("Full OCR extraction for %d image(s)", len(downloadedImages))
+	// Step 3: Process PURE OCR for ALL images (NEW OPTIMIZED VERSION)
+	// Changed from full structured extraction to raw text only - saves ~25,000 tokens per image!
+	reqCtx.StartStep("pure_ocr_extraction_all")
+	reqCtx.LogInfo("Pure OCR extraction (raw text only) for %d image(s)", len(downloadedImages))
 
 	// Check if we should continue (not timed out)
 	select {
 	case <-timeout:
-		reqCtx.EndStep("cancelled", nil, fmt.Errorf("timeout before full OCR"))
+		reqCtx.EndStep("cancelled", nil, fmt.Errorf("timeout before pure OCR"))
 		return
 	default:
 		// Continue
 	}
 
-	type FullOCRImageResult struct {
+	type PureOCRImageResult struct {
 		ImageIndex int
-		Result     *ai.ExtractionResult
+		Result     *ai.SimpleOCRResult
 		Tokens     *common.TokenUsage
 		Error      error
 	}
 
-	var fullOCRResults []FullOCRImageResult
-	var totalFullOCRTokens common.TokenUsage
-
-	// Collect Phase 2 quality issues
-	var phase2FailedImages []FailedImageInfo
-	var phase2PassedImages []PassedImageInfo
+	var pureOCRResults []PureOCRImageResult
+	var totalPureOCRTokens common.TokenUsage
 
 	// ⚡ PARALLEL PROCESSING: Process all images concurrently
 	type ocrJob struct {
@@ -396,23 +489,23 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		index int
 	}
 
-	resultsChan := make(chan FullOCRImageResult, len(downloadedImages))
+	resultsChan := make(chan PureOCRImageResult, len(downloadedImages))
 	jobsChan := make(chan ocrJob, len(downloadedImages))
 
 	// Start worker goroutines
-	numWorkers := len(downloadedImages)
-	if numWorkers > 3 {
-		numWorkers = 3 // Limit to 3 concurrent requests to avoid API rate limits
-	}
+	// Changed to sequential processing (1 worker) to prevent 429 Rate Limit errors
+	// Gemini Free Tier: 15 RPM = must wait ~4 seconds between requests
+	// Parallel processing (3 workers) causes burst traffic → 429 errors
+	numWorkers := 1 // Sequential processing - safe for Tier 1 (15 RPM limit)
 
 	for w := 0; w < numWorkers; w++ {
 		go func() {
 			for job := range jobsChan {
-				result, fullOCRTokens, err := ai.ProcessOCRAndGemini(job.img.Filename, reqCtx)
-				resultsChan <- FullOCRImageResult{
+				result, pureOCRTokens, err := ai.ProcessPureOCR(job.img.Filename, reqCtx)
+				resultsChan <- PureOCRImageResult{
 					ImageIndex: job.img.Index,
 					Result:     result,
-					Tokens:     fullOCRTokens,
+					Tokens:     pureOCRTokens,
 					Error:      err,
 				}
 			}
@@ -426,7 +519,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	close(jobsChan)
 
 	// Collect results
-	resultsMap := make(map[int]FullOCRImageResult)
+	resultsMap := make(map[int]PureOCRImageResult)
 	for i := 0; i < len(downloadedImages); i++ {
 		res := <-resultsChan
 		resultsMap[res.ImageIndex] = res
@@ -437,102 +530,92 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	for _, img := range downloadedImages {
 		res := resultsMap[img.Index]
 		result := res.Result
-		fullOCRTokens := res.Tokens
+		pureOCRTokens := res.Tokens
 		err := res.Error
 
 		if err != nil {
-			reqCtx.LogWarning("⚠️  Image %d Full OCR failed: %v", img.Index, err)
+			reqCtx.LogWarning("⚠️  Image %d Pure OCR failed: %v", img.Index, err)
+			// Note: Enhanced fixJSONEscaping() should handle most complex documents now
 			// Continue with other images even if one fails
 		}
 
-		// ⚡ QUALITY VALIDATION - Phase 2 (Collect extraction quality issues)
-		var issues []ImageQualityIssue
-
-		if result != nil && err == nil {
-			// Check: Overall confidence from validation metadata
-			// Note: N/A item check removed - not all accounting documents have line items
-			// (e.g., tax receipts, utility bills, government fees, payment slips)
-			// Access OverallConfidence directly from Validation struct
-			if result.Validation.OverallConfidence.Score > 0 {
-				scoreFloat := float64(result.Validation.OverallConfidence.Score)
-				if scoreFloat < MIN_OVERALL_CONFIDENCE {
-					issues = append(issues, ImageQualityIssue{
-						Field:        "overall_confidence",
-						Issue:        fmt.Sprintf("ความมั่นใจในการสกัดข้อมูลต่ำเกินไป - %.1f%%", scoreFloat),
-						CurrentValue: fmt.Sprintf("%.1f%%", scoreFloat),
-						MinRequired:  fmt.Sprintf("%.1f%%", MIN_OVERALL_CONFIDENCE),
-					})
-				}
-			}
+		// Basic validation: check if we got text
+		if result != nil && result.RawDocumentText == "" {
+			reqCtx.LogWarning("⚠️  Image %d - No text extracted (blank or unreadable image)", img.Index)
 		}
 
-		// Store Phase 2 quality result
-		if len(issues) > 0 {
-			reqCtx.LogWarning("⚠️  Image %d (GUID: %s) - Phase 2 quality issues: %d", img.Index, img.GUID, len(issues))
-			phase2FailedImages = append(phase2FailedImages, FailedImageInfo{
-				DocumentImageGUID: img.GUID,
-				ImageIndex:        img.Index,
-				ImageURI:          img.URI,
-				Issues:            issues,
-			})
-		} else {
-			phase2PassedImages = append(phase2PassedImages, PassedImageInfo{
-				DocumentImageGUID: img.GUID,
-				ImageIndex:        img.Index,
-				ImageURI:          img.URI,
-				Note:              "รูปนี้ผ่านการตรวจสอบคุณภาพ แต่ไม่สามารถประมวลผลได้เพราะมีรูปอื่นไม่ผ่าน",
-			})
-		}
-
-		fullOCRResults = append(fullOCRResults, FullOCRImageResult{
+		pureOCRResults = append(pureOCRResults, PureOCRImageResult{
 			ImageIndex: img.Index,
 			Result:     result,
-			Tokens:     fullOCRTokens,
+			Tokens:     pureOCRTokens,
 			Error:      err,
 		})
 
-		if fullOCRTokens != nil {
-			totalFullOCRTokens.InputTokens += fullOCRTokens.InputTokens
-			totalFullOCRTokens.OutputTokens += fullOCRTokens.OutputTokens
-			totalFullOCRTokens.TotalTokens += fullOCRTokens.TotalTokens
-			totalFullOCRTokens.CostUSD += fullOCRTokens.CostUSD
-			totalFullOCRTokens.CostTHB += fullOCRTokens.CostTHB
+		if pureOCRTokens != nil {
+			totalPureOCRTokens.InputTokens += pureOCRTokens.InputTokens
+			totalPureOCRTokens.OutputTokens += pureOCRTokens.OutputTokens
+			totalPureOCRTokens.TotalTokens += pureOCRTokens.TotalTokens
+			totalPureOCRTokens.CostUSD += pureOCRTokens.CostUSD
+			totalPureOCRTokens.CostTHB += pureOCRTokens.CostTHB
 		}
 	}
 
-	reqCtx.LogInfo("✓ Full OCR completed for %d image(s)", len(fullOCRResults))
+	reqCtx.LogInfo("✓ Pure OCR completed for %d image(s) - Token savings: ~82%% vs old method", len(pureOCRResults))
 
-	// ⚡ CHECK PHASE 2 QUALITY RESULTS - If ANY image failed extraction quality, reject ALL
-	if len(phase2FailedImages) > 0 {
-		reqCtx.LogWarning("❌ REJECTING ALL - %d of %d image(s) failed Phase 2 extraction quality",
-			len(phase2FailedImages), len(downloadedImages))
-		reqCtx.EndStep("rejected", &totalFullOCRTokens, nil)
-
-		message := fmt.Sprintf("สกัดข้อมูลจาก %d จาก %d รูปไม่สำเร็จ เนื่องจากคุณภาพรูปไม่เพียงพอ กรุณาอัพโหลดรูปใหม่",
-			len(phase2FailedImages), len(downloadedImages))
-
-		c.JSON(http.StatusBadRequest, RejectionResponse{
-			Status:       "rejected",
-			Reason:       "extraction_quality_insufficient",
-			Message:      message,
-			FailedImages: phase2FailedImages,
-			PassedImages: phase2PassedImages,
-			Suggestions: []string{
-				"ถ่ายรูปใหม่ในที่มีแสงสว่างเพียงพอ",
-				"ให้กล้องโฟกัสชัดก่อนถ่าย ตรวจสอบว่ารูปไม่เบลอ",
-				"ตรวจสอบว่ารายการสินค้าทุกรายการเห็นชัดเจน",
-				"หลีกเลี่ยงการถ่ายรูปที่มีลายมือเขียนไม่ชัด",
-				"วางใบเสร็จให้เรียบ ไม่ยับ ไม่พับ",
-			},
-			RequestID:   reqCtx.RequestID,
-			TotalImages: len(downloadedImages),
-			FailedCount: len(phase2FailedImages),
-		})
-		return
+	// 🔍 DEBUG: Log pure OCR results (only when debug=true)
+	if debugMode {
+		reqCtx.LogInfo("📋 DEBUG: Pure OCR Results Overview:")
+		for i, ocrResult := range pureOCRResults {
+			if ocrResult.Result != nil {
+				// Show first 500 chars of raw text
+				rawText := ocrResult.Result.RawDocumentText
+				if len(rawText) > 500 {
+					rawText = rawText[:500] + "..."
+				}
+				reqCtx.LogInfo("Image %d Raw Text:\n%s", i, rawText)
+			}
+		}
 	}
 
-	reqCtx.LogInfo("✓ All %d image(s) passed Phase 2 quality checks", len(fullOCRResults))
-	reqCtx.EndStep("success", &totalFullOCRTokens, nil)
+	reqCtx.EndStep("success", &totalPureOCRTokens, nil)
+
+	// Step 3.5: Template Matching Analysis (NEW SMART OPTIMIZATION)
+	// Analyze raw text to see if it matches any predefined accounting template
+	// If match found (≥85% confidence) → Use template-only mode (saves another ~20,000 tokens in Phase 3!)
+	reqCtx.StartStep("template_matching_analysis")
+	reqCtx.LogInfo("Analyzing text to find matching accounting templates...")
+
+	// Combine all raw text from all images for comprehensive matching
+	var combinedText string
+	for _, ocrResult := range pureOCRResults {
+		if ocrResult.Result != nil {
+			combinedText += ocrResult.Result.RawDocumentText + "\n\n"
+		}
+	}
+
+	// Run template matching
+	templateMatchResult := processor.AnalyzeTemplateMatch(combinedText, documentTemplates, reqCtx)
+
+	var masterDataMode ai.MasterDataMode
+	var matchedTemplate *bson.M
+
+	if templateMatchResult.Confidence >= 85 && templateMatchResult.Template != nil {
+		// 🎯 TEMPLATE MATCHED - Use optimized path
+		masterDataMode = ai.TemplateOnlyMode
+		matchedTemplate = &templateMatchResult.Template
+		reqCtx.LogInfo("✅ Template matched: %s (ID: %v, Confidence: %.1f%%) - Using template-only mode",
+			templateMatchResult.Description,
+			templateMatchResult.TemplateID,
+			templateMatchResult.Confidence)
+	} else {
+		// ❌ NO TEMPLATE MATCH - Use full master data
+		masterDataMode = ai.FullMode
+		matchedTemplate = nil
+		reqCtx.LogInfo("❌ No template match (Confidence: %.1f%% < 85%%) - Using full master data mode",
+			templateMatchResult.Confidence)
+	}
+
+	reqCtx.EndStep("success", nil, nil)
 
 	// Step 5: Prepare master data (already validated and loaded at the beginning)
 	reqCtx.StartStep("prepare_master_data")
@@ -578,45 +661,56 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	for _, cr := range masterCache.Creditors {
 		compressedCreditors = append(compressedCreditors, bson.M{
 			"code": cr["code"],
-			"name": cr["name"],
+			"name": extractNameFromNamesArray(cr),
+		})
+	}
+
+	var compressedDebtors []bson.M
+	for _, db := range masterCache.Debtors {
+		compressedDebtors = append(compressedDebtors, bson.M{
+			"code": db["code"],
+			"name": extractNameFromNamesArray(db),
 		})
 	}
 
 	accounts := compressedAccounts
 	journalBooks := compressedJournalBooks
 	creditors := compressedCreditors
+	debtors := compressedDebtors
 
-	reqCtx.LogInfo("✓ Master data ready: %d accounts (filtered from %d), %d journal books, %d creditors",
-		len(accounts), len(masterCache.Accounts), len(journalBooks), len(creditors))
+	reqCtx.LogInfo("✓ Master data ready: %d accounts (filtered from %d), %d journal books, %d creditors, %d debtors",
+		len(accounts), len(masterCache.Accounts), len(journalBooks), len(creditors), len(debtors))
 	reqCtx.EndStep("success", nil, nil)
 
-	// Step 6: Phase 2 - AI Multi-Image Accounting Analysis
-	reqCtx.StartStep("phase2_multi_image_accounting")
-	reqCtx.LogInfo("Analyzing relationships between %d image(s)", len(fullOCRResults))
+	// Step 6: Phase 3 - AI Multi-Image Accounting Analysis (with conditional master data loading)
+	reqCtx.StartStep("phase3_multi_image_accounting")
+	reqCtx.LogInfo("Analyzing relationships between %d image(s) - Mode: %s", len(pureOCRResults), masterDataMode)
 
 	// Check if we should continue (not timed out)
 	select {
 	case <-timeout:
-		reqCtx.EndStep("cancelled", &totalFullOCRTokens, fmt.Errorf("timeout before accounting analysis"))
+		reqCtx.EndStep("cancelled", &totalPureOCRTokens, fmt.Errorf("timeout before accounting analysis"))
 		return
 	default:
 		// Continue
 	}
 
-	// Process multi-image accounting analysis
-	accountingJSON, phase2Tokens, err := ai.ProcessMultiImageAccountingAnalysis(
+	// Process multi-image accounting analysis with conditional master data
+	accountingJSON, phase3Tokens, err := ai.ProcessMultiImageAccountingAnalysis(
 		downloadedImages,
-		fullOCRResults,
+		pureOCRResults,
+		masterDataMode,
+		matchedTemplate,
 		accounts,
 		journalBooks,
 		creditors,
-		masterCache.Debtors,
+		debtors,
 		masterCache.ShopProfile,
 		documentTemplates,
 		reqCtx,
 	)
 	if err != nil {
-		reqCtx.EndStep("failed", phase2Tokens, err)
+		reqCtx.EndStep("failed", phase3Tokens, err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":      "Accounting analysis failed",
 			"details":    err.Error(),
@@ -624,7 +718,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		})
 		return
 	}
-	reqCtx.EndStep("success", phase2Tokens, nil)
+	reqCtx.EndStep("success", phase3Tokens, nil)
 
 	// Parse accounting JSON
 	var accountingResponse map[string]interface{}
@@ -668,6 +762,50 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	var accountingEntry map[string]interface{}
 	if ae, ok := accountingResponse["accounting_entry"].(map[string]interface{}); ok {
 		accountingEntry = ae
+
+		// 🔥 CRITICAL: Validate creditor/debtor codes against master data
+		creditorCode := getStringValue(accountingEntry, "creditor_code")
+		debtorCode := getStringValue(accountingEntry, "debtor_code")
+
+		if creditorCode != "" {
+			found := false
+			for _, creditor := range masterCache.Creditors {
+				if code, ok := creditor["code"].(string); ok && code == creditorCode {
+					found = true
+					break
+				}
+			}
+			if !found {
+				reqCtx.LogWarning("⚠️  AI ส่ง creditor_code '%s' ที่ไม่มีในฐานข้อมูล → เปลี่ยนเป็น Unknown", creditorCode)
+				accountingEntry["creditor_code"] = ""
+				accountingEntry["creditor_name"] = ""
+			}
+		}
+
+		if debtorCode != "" {
+			found := false
+			for _, debtor := range masterCache.Debtors {
+				if code, ok := debtor["code"].(string); ok && code == debtorCode {
+					found = true
+					break
+				}
+			}
+			if !found {
+				reqCtx.LogWarning("⚠️  AI ส่ง debtor_code '%s' ที่ไม่มีในฐานข้อมูล → เปลี่ยนเป็น Unknown", debtorCode)
+				accountingEntry["debtor_code"] = ""
+				accountingEntry["debtor_name"] = ""
+			}
+		}
+
+		// 🔥 CRITICAL: Validate template usage - check if all accounts are used
+		if matchedTemplate != nil {
+			if details, ok := (*matchedTemplate)["details"].(bson.A); ok && len(details) > 0 {
+				entriesRaw, _ := accountingEntry["entries"].([]interface{})
+				if len(entriesRaw) < len(details) {
+					reqCtx.LogWarning("⚠️  Template has %d accounts but AI only used %d → Missing accounts!", len(details), len(entriesRaw))
+				}
+			}
+		}
 	} else {
 		accountingEntry = map[string]interface{}{}
 	}
@@ -676,24 +814,34 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	if vd, ok := accountingResponse["validation"].(map[string]interface{}); ok {
 		validationData = vd
 	} else {
-		// Fallback validation from first successful OCR result
+		// Fallback validation (Pure OCR doesn't have validation data)
 		validationData = map[string]interface{}{
 			"overall_confidence": map[string]interface{}{"level": "medium", "score": 75},
 			"requires_review":    true,
 		}
-		// Try to get from first fullOCRResult
-		for _, ocrResult := range fullOCRResults {
+	}
+
+	// Step 9: Prepare debug data if requested
+	var debugData map[string]interface{}
+	if debugMode {
+		// Include pure OCR results in response for debugging
+		ocrDebugData := []map[string]interface{}{}
+		for i, ocrResult := range pureOCRResults {
 			if ocrResult.Result != nil {
-				validationData = map[string]interface{}{
-					"overall_confidence": ocrResult.Result.Validation.OverallConfidence,
-					"requires_review":    ocrResult.Result.Validation.RequiresReview,
-				}
-				break
+				ocrDebugData = append(ocrDebugData, map[string]interface{}{
+					"image_index": i,
+					"ocr_result":  ocrResult.Result,
+				})
 			}
+		}
+		debugData = map[string]interface{}{
+			"pure_ocr_results": ocrDebugData,
+			"note":             "Debug mode enabled - showing pure OCR extraction data (raw text only)",
+			"template_match":   templateMatchResult,
 		}
 	}
 
-	// Step 9: Check if we timed out during processing
+	// Step 10: Check if we timed out during processing
 	select {
 	case <-timeout:
 		// Timeout occurred, but we finished anyway - return response with warning
@@ -725,26 +873,22 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Extract template information (which template AI used and why)
-	templateInfo := processor.ExtractTemplateInfo(accountingResponse, documentTemplates, reqCtx)
+	templateInfo := processor.ExtractTemplateInfo(accountingResponse, documentTemplates, matchedTemplate, reqCtx)
 
-	// Get primary receipt data from accounting response or first successful OCR result
+	// Get primary receipt data from accounting response (Pure OCR doesn't extract structured data)
 	var receiptData map[string]interface{}
 	if rd, ok := accountingResponse["receipt"].(map[string]interface{}); ok {
 		receiptData = rd
 	} else {
-		// Fallback to first successful OCR result
-		for _, ocrResult := range fullOCRResults {
-			if ocrResult.Result != nil {
-				receiptData = gin.H{
-					"number":        ocrResult.Result.ReceiptNumber,
-					"date":          ocrResult.Result.InvoiceDate,
-					"vendor_name":   "Unknown Vendor", // Vendor info now comes from Phase 3 accounting analysis
-					"vendor_tax_id": "Unknown Vendor",
-					"total":         ocrResult.Result.TotalAmount.Value,
-					"vat":           ocrResult.Result.VATAmount.Value,
-				}
-				break
-			}
+		// Pure OCR only has raw text, so accounting response should provide structured data
+		// If missing, use minimal fallback
+		receiptData = gin.H{
+			"number":        "N/A",
+			"date":          "N/A",
+			"vendor_name":   "N/A", // All info comes from Phase 3 accounting analysis
+			"vendor_tax_id": "N/A",
+			"total":         0,
+			"vat":           0,
 		}
 	}
 
@@ -795,6 +939,12 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			"cost_thb":         summary["token_usage"].(map[string]interface{})["cost_thb"],
 			"images_processed": len(downloadedImages),
 		},
+
+		// Note: IMPORTANT - Always verify request_id matches your request log!
+		// If IDs don't match, this might be a cached/wrong response.
+
+		// Debug data (only included if debug=true query parameter)
+		"debug_data": debugData,
 	}
 
 	// Signal completion

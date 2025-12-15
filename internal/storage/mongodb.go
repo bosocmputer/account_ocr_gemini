@@ -58,13 +58,44 @@ func CloseMongoDB() {
 	}
 }
 
+// ShopName represents a single name entry in the names array
+type ShopName struct {
+	Code     string `bson:"code" json:"code"`
+	Name     string `bson:"name" json:"name"`
+	IsAuto   bool   `bson:"isauto" json:"isauto"`
+	IsDelete bool   `bson:"isdelete" json:"isdelete"`
+}
+
 // ShopProfile represents a shop's profile information
 type ShopProfile struct {
-	GuidFixed string `bson:"guidfixed" json:"guidfixed"`
-	Name1     string `bson:"name1" json:"name1"`
+	GuidFixed string     `bson:"guidfixed" json:"guidfixed"`
+	Names     []ShopName `bson:"names" json:"names"`
 	Settings  struct {
 		TaxID string `bson:"taxid" json:"taxid"`
 	} `bson:"settings" json:"settings"`
+}
+
+// GetCompanyName returns the Thai name (code="th") or first active name from Names array
+func (s *ShopProfile) GetCompanyName() string {
+	if s == nil || len(s.Names) == 0 {
+		return ""
+	}
+
+	// Try to find Thai name first
+	for _, n := range s.Names {
+		if n.Code == "th" && !n.IsDelete && n.Name != "" {
+			return n.Name
+		}
+	}
+
+	// Fallback to first non-deleted name
+	for _, n := range s.Names {
+		if !n.IsDelete && n.Name != "" {
+			return n.Name
+		}
+	}
+
+	return ""
 }
 
 // GetShopProfile retrieves shop profile by shopid (guidfixed)

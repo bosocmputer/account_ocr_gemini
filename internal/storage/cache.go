@@ -14,8 +14,8 @@ type MasterDataCache struct {
 	Accounts     []bson.M
 	JournalBooks []bson.M
 	Creditors    []bson.M
-	Debtors      []bson.M      // เพิ่มลูกหนี้
-	ShopProfile  *ShopProfile  // เพิ่มข้อมูลบริษัท
+	Debtors      []bson.M     // เพิ่มลูกหนี้
+	ShopProfile  *ShopProfile // เพิ่มข้อมูลบริษัท
 	LoadedAt     time.Time
 	ShopID       string
 	mu           sync.RWMutex
