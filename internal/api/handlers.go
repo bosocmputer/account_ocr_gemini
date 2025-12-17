@@ -1058,6 +1058,56 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		}
 	}
 
+	// Collect OCR warnings from all processed images
+	var ocrWarnings []gin.H
+	for i, ocrResult := range pureOCRResults {
+		// Case 1: OCR succeeded with warnings
+		if ocrResult.Result != nil && (ocrResult.Result.IsPartial || ocrResult.Result.FallbackUsed || ocrResult.Result.Warning != "") {
+			warning := gin.H{
+				"image_index": i,
+			}
+			if ocrResult.Result.IsPartial {
+				warning["is_partial"] = true
+			}
+			if ocrResult.Result.FallbackUsed {
+				warning["fallback_used"] = true
+			}
+			if ocrResult.Result.Warning != "" {
+				warning["warning"] = ocrResult.Result.Warning
+			}
+			if ocrResult.Result.TextLength > 0 {
+				warning["text_length"] = ocrResult.Result.TextLength
+			}
+			ocrWarnings = append(ocrWarnings, warning)
+		} else if ocrResult.Error != nil {
+			// Case 2: OCR failed completely
+			warning := gin.H{
+				"image_index": i,
+				"error":       "OCR extraction failed",
+				"details":     ocrResult.Error.Error(),
+			}
+			ocrWarnings = append(ocrWarnings, warning)
+		}
+	}
+
+	// Build metadata with OCR warnings if any
+	metadata := gin.H{
+		"request_id":       reqCtx.RequestID,
+		"processed_at":     time.Now().Format(time.RFC3339),
+		"duration_sec":     summary["total_duration_sec"],
+		"images_processed": len(downloadedImages),
+		"token_usage": gin.H{
+			"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
+			"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
+			"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
+			"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
+		},
+	}
+	// Add OCR warnings if any issues were detected
+	if len(ocrWarnings) > 0 {
+		metadata["ocr_warnings"] = ocrWarnings
+	}
+
 	response := gin.H{
 		"shopid": req.ShopID,
 		"status": "success",
@@ -1086,19 +1136,8 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		// NEW: Source images metadata
 		"source_images": sourceImages,
 
-		// Metadata: For tracking and debugging
-		"metadata": gin.H{
-			"request_id":       reqCtx.RequestID,
-			"processed_at":     time.Now().Format(time.RFC3339),
-			"duration_sec":     summary["total_duration_sec"],
-			"images_processed": len(downloadedImages),
-			"token_usage": gin.H{
-				"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
-				"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
-				"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
-				"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
-			},
-		},
+		// Metadata: For tracking and debugging (includes OCR warnings if any)
+		"metadata": metadata,
 
 		// Note: IMPORTANT - Always verify request_id matches your request log!
 		// If IDs don't match, this might be a cached/wrong response.

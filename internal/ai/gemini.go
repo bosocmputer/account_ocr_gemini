@@ -280,6 +280,10 @@ type AIMetadata struct {
 type SimpleOCRResult struct {
 	Status          string     `json:"status"`
 	RawDocumentText string     `json:"raw_document_text"` // ข้อความทั้งหมดจากเอกสาร
+	IsPartial       bool       `json:"is_partial"`        // true if response was truncated due to token limit
+	TextLength      int        `json:"text_length"`       // length of extracted text in characters
+	Warning         string     `json:"warning,omitempty"` // warning message if any issues occurred
+	FallbackUsed    bool       `json:"fallback_used"`     // true if plain text fallback was used instead of JSON
 	Metadata        AIMetadata `json:"metadata"`
 	RawResponse     string     `json:"raw_response,omitempty"`
 }
@@ -345,6 +349,11 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	imageSize := len(imageData)
 	reqCtx.LogInfo("📸 Image size: %d bytes (%.2f MB)", imageSize, float64(imageSize)/(1024*1024))
 
+	// Warn if image is large (may cause truncation)
+	if imageSize > 500*1024 {
+		reqCtx.LogWarning("⚠️  Large image detected (%d bytes). May exceed token output limit.", imageSize)
+	}
+
 	// Step 2: Initialize the Gemini client
 	reqCtx.StartSubStep("init_gemini_client")
 	ctx := context.Background()
@@ -356,7 +365,13 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 
 	// Use OCR-specific model for Phase 1
 	model := client.GenerativeModel(configs.OCR_MODEL_NAME)
-	reqCtx.LogInfo("📖 Phase 1 - OCR Model: %s", configs.OCR_MODEL_NAME)
+
+	// Set explicit MaxOutputTokens to prevent silent truncation
+	model.GenerationConfig = genai.GenerationConfig{
+		MaxOutputTokens: ptr(int32(8192)), // Gemini's max output limit
+	}
+
+	reqCtx.LogInfo("📖 Phase 1 - OCR Model: %s (MaxOutputTokens: 8192)", configs.OCR_MODEL_NAME)
 	reqCtx.EndSubStep("")
 
 	// Step 3: Define the simple JSON schema (raw text only)
@@ -428,15 +443,33 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	// Step 7: Unmarshal the JSON into SimpleOCRResult struct
 	var result SimpleOCRResult
 	if err := json.Unmarshal([]byte(jsonResponse), &result); err != nil {
-		reqCtx.EndSubStep("❌ FAILED")
+		reqCtx.EndSubStep("❌ JSON PARSE FAILED")
 		// Log the problematic JSON response for debugging (first 500 chars)
 		preview := jsonResponse
 		if len(preview) > 500 {
 			preview = preview[:500] + "... (truncated)"
 		}
 		reqCtx.LogInfo("⚠️  Failed to parse JSON response. Preview: %s", preview)
-		reqCtx.LogInfo("⚠️  JSON Parse Error: %v", err)
-		return nil, nil, fmt.Errorf("failed to unmarshal JSON response: %w", err)
+		reqCtx.LogInfo("⚠️  JSON Parse Error: %v. Trying fallback plain text extraction...", err)
+
+		// FALLBACK: Try plain text extraction without JSON schema
+		reqCtx.StartSubStep("fallback_plain_text_ocr")
+		fallbackResult, fallbackUsage, fallbackErr := tryPlainTextOCR(ctx, client, imageData, mimeType, reqCtx)
+		if fallbackErr != nil {
+			reqCtx.EndSubStep("❌ FALLBACK FAILED")
+			return nil, nil, fmt.Errorf("JSON parse failed and fallback failed: %w (original error: %v)", fallbackErr, err)
+		}
+		reqCtx.EndSubStep("✅ FALLBACK SUCCESS")
+
+		// Enhance warning message with fallback info
+		if fallbackResult.Warning != "" {
+			// Already has truncation warning from tryPlainTextOCR
+			fallbackResult.Warning = "Original JSON response was truncated. " + fallbackResult.Warning
+		} else {
+			fallbackResult.Warning = "Original JSON response was truncated. Using plain text fallback."
+		}
+		// FallbackUsed is already set to true in tryPlainTextOCR
+		return fallbackResult, fallbackUsage, nil
 	}
 	reqCtx.EndSubStep("")
 
@@ -444,6 +477,19 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	reqCtx.StartSubStep("extract_metadata")
 	result.Metadata = AIMetadata{
 		ModelName: configs.OCR_MODEL_NAME,
+	}
+
+	// Set text length metadata
+	result.TextLength = len(result.RawDocumentText)
+	result.FallbackUsed = false // successful JSON parse means no fallback used
+
+	// Check if JSON response was truncated using FinishReason
+	if len(resp.Candidates) > 0 && resp.Candidates[0].FinishReason == genai.FinishReasonMaxTokens {
+		result.IsPartial = true
+		result.Warning = "JSON response was truncated due to token limit. Data may be incomplete."
+		reqCtx.LogWarning("⚠️  JSON response was truncated (FinishReason: MAX_TOKENS)")
+	} else {
+		result.IsPartial = false // complete response
 	}
 
 	// Extract token usage if available
@@ -489,6 +535,113 @@ func createSimpleOCRSchema() *genai.Schema {
 		},
 		Required: []string{"status", "raw_document_text"},
 	}
+}
+
+// ptr is a helper function to get a pointer to an int32 value
+func ptr(i int32) *int32 {
+	return &i
+}
+
+// tryPlainTextOCR attempts to extract OCR as plain text without JSON schema
+// This is used as a fallback when JSON parsing fails due to truncation
+func tryPlainTextOCR(ctx context.Context, client *genai.Client, imageData []byte, mimeType string, reqCtx *common.RequestContext) (*SimpleOCRResult, *common.TokenUsage, error) {
+	reqCtx.LogInfo("🔄 Attempting plain text OCR fallback...")
+
+	// Use same OCR model
+	model := client.GenerativeModel(configs.OCR_MODEL_NAME)
+
+	// Set MaxOutputTokens
+	model.GenerationConfig = genai.GenerationConfig{
+		MaxOutputTokens: ptr(int32(8192)),
+	}
+
+	// NO JSON schema - just plain text response
+	prompt := `Extract ALL visible text from this document.
+Read everything from top to bottom, left to right.
+Include headers, content, footers, notes, and any other text.
+Return ONLY the extracted text, nothing else.`
+
+	// Call Gemini API
+	resp, err := callGeminiWithRetry(ctx, model,
+		genai.Text(prompt),
+		genai.Blob{
+			MIMEType: mimeType,
+			Data:     imageData,
+		},
+		reqCtx,
+		DefaultRetryConfig,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("plain text OCR failed: %w", err)
+	}
+
+	// Extract plain text response with detailed error logging
+	if len(resp.Candidates) == 0 {
+		reqCtx.LogError("⚠️  Gemini returned 0 candidates in plain text mode")
+		if resp.PromptFeedback != nil {
+			reqCtx.LogError("⚠️  PromptFeedback BlockReason: %v", resp.PromptFeedback.BlockReason)
+		}
+		return nil, nil, fmt.Errorf("no candidates from Gemini API in plain text mode (possibly blocked or rate limited)")
+	}
+
+	if len(resp.Candidates[0].Content.Parts) == 0 {
+		reqCtx.LogError("⚠️  Candidate has 0 parts. FinishReason: %v", resp.Candidates[0].FinishReason)
+		return nil, nil, fmt.Errorf("no content parts from Gemini API in plain text mode (FinishReason: %v)", resp.Candidates[0].FinishReason)
+	}
+
+	var plainText string
+	for _, part := range resp.Candidates[0].Content.Parts {
+		if text, ok := part.(genai.Text); ok {
+			plainText = string(text)
+			break
+		}
+	}
+
+	if plainText == "" {
+		reqCtx.LogError("⚠️  Plain text extraction resulted in empty string. Parts count: %d", len(resp.Candidates[0].Content.Parts))
+		return nil, nil, fmt.Errorf("empty text from Gemini API in plain text mode (FinishReason: %v)", resp.Candidates[0].FinishReason)
+	}
+
+	reqCtx.LogInfo("✅ Plain text extraction successful: %d chars", len(plainText))
+
+	// Check if response was truncated using FinishReason
+	isPartial := false
+	warningMsg := ""
+	if len(resp.Candidates) > 0 && resp.Candidates[0].FinishReason == genai.FinishReasonMaxTokens {
+		isPartial = true
+		warningMsg = "Plain text extraction was truncated due to token limit. Document may be too large."
+		reqCtx.LogWarning("⚠️  Plain text was truncated (FinishReason: MAX_TOKENS)")
+	}
+
+	// Build SimpleOCRResult
+	result := &SimpleOCRResult{
+		Status:          "success",
+		RawDocumentText: plainText,
+		IsPartial:       isPartial,
+		TextLength:      len(plainText),
+		Warning:         warningMsg,
+		FallbackUsed:    true, // this is the fallback mode
+		Metadata: AIMetadata{
+			ModelName: configs.OCR_MODEL_NAME,
+		},
+		RawResponse: plainText,
+	}
+
+	// Extract token usage
+	var tokenUsage *common.TokenUsage
+	if resp.UsageMetadata != nil {
+		result.Metadata.PromptTokens = resp.UsageMetadata.PromptTokenCount
+		result.Metadata.CandidatesTokens = resp.UsageMetadata.CandidatesTokenCount
+		result.Metadata.TotalTokens = resp.UsageMetadata.TotalTokenCount
+
+		tokens := common.CalculateOCRTokenCost(
+			int(resp.UsageMetadata.PromptTokenCount),
+			int(resp.UsageMetadata.CandidatesTokenCount),
+		)
+		tokenUsage = &tokens
+	}
+
+	return result, tokenUsage, nil
 }
 
 // createTemplateMatchSchema creates the JSON schema for AI template matching
