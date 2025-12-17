@@ -323,35 +323,41 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	imageData, mimeType, err := processor.PreprocessImageHighQuality(imagePath)
 	reqCtx.EndSubStep("")
 	if err != nil {
-		// If preprocessing fails, fall back to original image
-		reqCtx.LogInfo("⚠️  High-quality image preprocessing failed, using original: %v", err)
+		// If preprocessing fails, fall back to original file
+		reqCtx.LogInfo("⚠️  High-quality preprocessing failed, using original: %v", err)
 		imageData, err = os.ReadFile(imagePath)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read image file: %w", err)
+			return nil, nil, fmt.Errorf("failed to read file: %w", err)
 		}
 
 		// Detect MIME type from file extension
-		mimeType = "jpeg" // default
+		mimeType = "image/jpeg" // default
 		ext := strings.ToLower(filepath.Ext(imagePath))
 		switch ext {
+		case ".pdf":
+			mimeType = "application/pdf"
 		case ".png":
-			mimeType = "png"
+			mimeType = "image/png"
 		case ".jpg", ".jpeg":
-			mimeType = "jpeg"
+			mimeType = "image/jpeg"
 		case ".gif":
-			mimeType = "gif"
+			mimeType = "image/gif"
 		case ".webp":
-			mimeType = "webp"
+			mimeType = "image/webp"
 		}
 	}
 
-	// Log image size for debugging
-	imageSize := len(imageData)
-	reqCtx.LogInfo("📸 Image size: %d bytes (%.2f MB)", imageSize, float64(imageSize)/(1024*1024))
+	// Log file size for debugging
+	fileSize := len(imageData)
+	fileType := "Image"
+	if strings.HasPrefix(mimeType, "application/pdf") {
+		fileType = "PDF"
+	}
+	reqCtx.LogInfo("📄 %s size: %d bytes (%.2f MB)", fileType, fileSize, float64(fileSize)/(1024*1024))
 
-	// Warn if image is large (may cause truncation)
-	if imageSize > 500*1024 {
-		reqCtx.LogWarning("⚠️  Large image detected (%d bytes). May exceed token output limit.", imageSize)
+	// Warn if file is large (may cause truncation)
+	if fileSize > 500*1024 {
+		reqCtx.LogWarning("⚠️  Large file detected (%d bytes). May exceed token output limit.", fileSize)
 	}
 
 	// Step 2: Initialize the Gemini client

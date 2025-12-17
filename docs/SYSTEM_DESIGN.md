@@ -14,8 +14,12 @@ flowchart TD
     B --> C[Validate Master Data First]
     C --> D{Master Data ครบ?}
     D -->|ไม่ครบ| E[Return Error with Details]
-    D -->|ครบ| F[ดาวน์โหลดรูปจาก Azure Blob Storage]
-    F --> G[Phase 1: Pure OCR + Image Quality Check]
+    D -->|ครบ| F[ดาวน์โหลดไฟล์จาก Azure Blob Storage]
+    F --> F1{File Type?}
+    F1 -->|PDF| F2[Skip Preprocessing - ส่ง Raw PDF]
+    F1 -->|Image| F3[High Quality Image Preprocessing]
+    F2 --> G[Phase 1: Pure OCR + Quality Check]
+    F3 --> G[Phase 1: Pure OCR + Image Quality Check]
     G --> H{รูปภาพคุณภาพดี?}
     H -->|ไม่ดี| I[Return Rejection with Suggestions]
     H -->|ดี| J[Phase 2: Template Matching - จับคู่กับ Template]
@@ -50,7 +54,7 @@ flowchart TD
 | `internal/ai/gemini_retry.go` | Retry logic สำหรับ Gemini API (จัดการ 429, 500 errors) |
 | **🔧 Processing & Storage** | |
 | `internal/processor/template_matcher.go` | จับคู่เอกสารกับ Template ที่กำหนดไว้ (ใช้ AI) |
-| `internal/processor/imageprocessor.go` | Image Preprocessing (High Quality Mode) |
+| `internal/processor/imageprocessor.go` | Image Preprocessing (High Quality Mode) + PDF Pass-through |
 | `internal/storage/mongodb.go` | เชื่อมต่อ MongoDB + Query ข้อมูล |
 | `internal/storage/cache.go` | Cache Master Data (TTL 5 นาที) |
 | `internal/ratelimit/rate_limiter.go` | Rate Limiting สำหรับ Gemini API |
@@ -64,8 +68,9 @@ flowchart TD
 **ไฟล์**: `internal/ai/prompt_ocr.go`  
 **ฟังก์ชัน**: `GetPureOCRPrompt()`
 
-**หน้าที่**: 
-- อ่านข้อความทั้งหมดจากรูปภาพเป็น **raw_document_text**
+**หน้าที่**:
+- อ่านข้อความทั้งหมดจากรูปภาพหรือ PDF เป็น **raw_document_text**
+- รองรับทั้ง Image files (JPEG, PNG) และ PDF files (รวมทั้ง multi-page PDFs)
 - ไม่วิเคราะห์ ไม่แยกโครงสร้าง ไม่ทำความเข้าใจ
 - แค่อ่านทุกตัวอักษรที่เห็นแล้วส่งกลับเป็นข้อความดิบ
 - ประหยัด Token: ~82% เทียบกับแบบเดิมที่ให้ AI แยกโครงสร้างด้วย
@@ -244,17 +249,19 @@ flowchart LR
 
 ### Phase 1: Pure OCR + Image Quality Validation
 - **ฟังก์ชัน**: `ProcessPureOCR()` (gemini.go)
-- อ่านข้อความดิบจากรูปภาพทั้งหมด (raw_document_text)
-- ประมวลผลรูปภาพด้วย **High Quality Preprocessing** (`PreprocessImageHighQuality()`)
-  - Sharpen, Contrast, Brightness, Grayscale enhancement
-  - Fallback to original image หากประมวลผลไม่สำเร็จ
+- อ่านข้อความดิบจากรูปภาพหรือ PDF ทั้งหมด (raw_document_text)
+- **รองรับ File Types**:
+  - **PDF Files** (application/pdf): ส่ง raw PDF bytes โดยตรง ไม่ต้อง preprocess
+  - **Image Files** (JPEG, PNG): ประมวลผลด้วย **High Quality Preprocessing** (`PreprocessImageHighQuality()`)
+    - Sharpen, Contrast, Brightness, Grayscale enhancement
+    - Fallback to original image หากประมวลผลไม่สำเร็จ
 - ประหยัด token ~82% เทียบกับการให้ AI แยกโครงสร้างทันที
 - **ตรวจสอบคุณภาพรูปภาพ** ตามเกณฑ์:
   - Text Clarity Score ≥ 70%
   - Handwriting Confidence ≥ 85%
   - Overall Confidence ≥ 70%
 - Return: `raw_document_text` + validation metadata
-- **Sequential Processing**: ประมวลผลทีละรูปเพื่อหลีกเลี่ยง Rate Limit 429 Error
+- **Sequential Processing**: ประมวลผลทีละไฟล์เพื่อหลีกเลี่ยง Rate Limit 429 Error
 
 ### Phase 2: Template Matching (AI-Driven)
 - **ฟังก์ชัน**: `AnalyzeTemplateMatch()` (template_matcher.go)
@@ -264,9 +271,10 @@ flowchart LR
 - ถ้า < 85% → **Full Mode** (ส่ง Chart of Accounts ทั้งหมดให้ AI)
 - รองรับ `promptdescription` จาก Template สำหรับคำแนะนำเฉพาะ
 
-### Phase 3: Accounting Analysis (Multi-Image Support)
+### Phase 3: Accounting Analysis (Multi-Image/PDF Support)
 - **ฟังก์ชัน**: `ProcessMultiImageAccountingAnalysis()` (gemini.go)
-- รวมข้อมูลจากหลายรูปภาพ (เช่น ใบเสร็จ + สลิปโอนเงิน)
+- รวมข้อมูลจากหลายไฟล์ (เช่น ใบเสร็จ PDF + สลิปโอนเงิน Image)
+- รองรับการผสมไฟล์ทั้ง PDF และ Image ในคำขอเดียวกัน
 - สร้าง Journal Entry ตาม:
   - Template (Template-Only Mode) หรือ
   - Master Data + Accounting Rules (Full Mode)
@@ -292,22 +300,25 @@ flowchart LR
 
 ## 🔑 ความสามารถพิเศษ
 
-1. **Image Quality Validation** - ตรวจสอบคุณภาพรูปภาพก่อนประมวลผล พร้อม Rejection Response แบบละเอียด
-2. **High Quality Image Preprocessing** - ปรับปรุงรูปภาพด้วย Sharpen, Contrast, Brightness เพื่อความแม่นยำสูงสุด
-3. **Template Enforcement** - ถ้าใช้ Template ต้องใช้ Account ครบตาม Template
-4. **AI-Driven Template Matching** - ใช้ Gemini AI เลือก Template อัจฉริยะพร้อมเหตุผล
-5. **Fuzzy Matching** - จับคู่ชื่อเจ้าหนี้/ลูกหนี้แม้สะกดต่างกัน (≥70%)
-6. **Multi-Image Support** - รวมข้อมูลจากหลายรูป (เช่น ใบเสร็จ + สลิปโอนเงิน)
-7. **Smart Rate Limiting** - Retry logic อัตโนมัติสำหรับ 429, 500 errors (exponential backoff)
-8. **Sequential Processing** - ป้องกัน 429 Error ด้วยการประมวลผลทีละรูป (1 worker)
-9. **Graceful Timeout** - 5 นาที timeout พร้อม Partial Results Summary
-10. **Request Context Tracking** - ติดตาม request ID และ processing steps สำหรับ debugging
-11. **In-Memory Cache** - Cache Master Data 5 นาที (auto-reload เมื่อหมดอายุ)
-12. **JSON Escaping Fix** - แก้ไขปัญหา JSON formatting จาก Gemini API อัตโนมัติ
+1. **PDF Native Support** - รองรับ PDF โดยตรงผ่าน Gemini API โดยไม่ต้องแปลงเป็นรูปภาพ
+2. **Image Quality Validation** - ตรวจสอบคุณภาพรูปภาพก่อนประมวลผล พร้อม Rejection Response แบบละเอียด
+3. **High Quality Image Preprocessing** - ปรับปรุงรูปภาพด้วย Sharpen, Contrast, Brightness เพื่อความแม่นยำสูงสุด
+4. **Template Enforcement** - ถ้าใช้ Template ต้องใช้ Account ครบตาม Template
+5. **AI-Driven Template Matching** - ใช้ Gemini AI เลือก Template อัจฉริยะพร้อมเหตุผล
+6. **Fuzzy Matching** - จับคู่ชื่อเจ้าหนี้/ลูกหนี้แม้สะกดต่างกัน (≥70%)
+7. **Multi-Image/PDF Support** - รวมข้อมูลจากหลายไฟล์ (เช่น ใบเสร็จ PDF + สลิปโอนเงิน Image)
+8. **Smart Rate Limiting** - Retry logic อัตโนมัติสำหรับ 429, 500 errors (exponential backoff)
+9. **Sequential Processing** - ป้องกัน 429 Error ด้วยการประมวลผลทีละไฟล์ (1 worker)
+10. **Graceful Timeout** - 5 นาที timeout พร้อม Partial Results Summary
+11. **Request Context Tracking** - ติดตาม request ID และ processing steps สำหรับ debugging
+12. **In-Memory Cache** - Cache Master Data 5 นาที (auto-reload เมื่อหมดอายุ)
+13. **JSON Escaping Fix** - แก้ไขปัญหา JSON formatting จาก Gemini API อัตโนมัติ
 
 ---
 
 ## 📤 ตัวอย่าง Request
+
+### Request แบบ Image
 
 ```bash
 POST /api/v1/analyze-receipt
@@ -318,7 +329,45 @@ Content-Type: application/json
   "imagereferences": [
     {
       "documentimageguid": "img-001",
-      "imageuri": "https://storage.azure.com/container/image1.jpg"
+      "imageuri": "https://storage.azure.com/container/receipt.jpg"
+    }
+  ]
+}
+```
+
+### Request แบบ PDF
+
+```bash
+POST /api/v1/analyze-receipt
+Content-Type: application/json
+
+{
+  "shopid": "shop-123",
+  "imagereferences": [
+    {
+      "documentimageguid": "pdf-001",
+      "imageuri": "https://storage.azure.com/container/receipt.pdf"
+    }
+  ]
+}
+```
+
+### Request แบบผสม (PDF + Image)
+
+```bash
+POST /api/v1/analyze-receipt
+Content-Type: application/json
+
+{
+  "shopid": "shop-123",
+  "imagereferences": [
+    {
+      "documentimageguid": "pdf-001",
+      "imageuri": "https://storage.azure.com/container/receipt.pdf"
+    },
+    {
+      "documentimageguid": "img-002",
+      "imageuri": "https://storage.azure.com/container/slip.jpg"
     }
   ]
 }
@@ -825,4 +874,35 @@ internal/ai/
 
 ---
 
-*อัปเดตล่าสุด: 16 ธันวาคม 2025 (v2.1 - Prompt Structure Refactoring)*
+## 📄 PDF Support
+
+ระบบรองรับ PDF โดยตรงผ่าน Gemini API โดยไม่ต้องแปลงเป็นรูปภาพ
+
+### ความสามารถ
+
+- ✅ รองรับทั้ง PDF และ Image (JPG, PNG) ในคำขอเดียวกัน
+- ✅ ตรวจจับ file type อัตโนมัติจาก Content-Type header
+- ✅ ส่ง PDF ไปยัง Gemini API โดยตรง (MIME type: `application/pdf`)
+- ✅ รองรับ multi-page PDFs (Gemini ประมวลผลทุกหน้า)
+- ✅ ไม่มีการ preprocess PDF (ส่งไฟล์ดิบ)
+
+### การทำงาน
+
+1. **Download Phase**: ตรวจจับ Content-Type เป็น `application/pdf`
+2. **Preprocessing Phase**: ข้าม image preprocessing สำหรับ PDF
+3. **OCR Phase**: ส่ง raw PDF bytes ไปยัง Gemini API
+4. **Analysis Phase**: ประมวลผลตามปกติเหมือน Image
+
+### ข้อจำกัด
+
+- PDF Size Limit: ~20MB (ข้อจำกัดของ Gemini API)
+- Token Limit: PDF ที่มีเนื้อหามากอาจเกิน output token limit (8192 tokens)
+- Best practices: PDF ที่มี text layer จะได้ผลลัพธ์แม่นยำกว่า scanned PDF
+
+### เอกสารเพิ่มเติม
+
+สำหรับรายละเอียดเพิ่มเติมเกี่ยวกับ PDF support ดูได้ที่: [PDF_SUPPORT.md](../PDF_SUPPORT.md)
+
+---
+
+*อัปเดตล่าสุด: 17 ธันวาคม 2025 (v2.4 - PDF Support)*

@@ -267,34 +267,56 @@ func getFloatValue(m map[string]interface{}, key string) float64 {
 	return 0.0
 }
 
-// downloadImageFromURL downloads an image from a URL and saves it to a local file
-func downloadImageFromURL(imageURL, filename string) error {
-	// Send GET request to download the image
+// downloadImageFromURL downloads an image or PDF from a URL and saves it to a local file
+// Returns the detected file extension based on Content-Type
+func downloadImageFromURL(imageURL, filename string) (string, error) {
+	// Send GET request to download the file
 	resp, err := http.Get(imageURL)
 	if err != nil {
-		return fmt.Errorf("failed to download image: %w", err)
+		return "", fmt.Errorf("failed to download file: %w", err)
 	}
 	defer resp.Body.Close()
 
 	// Check if response is successful
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("failed to download image: HTTP %d", resp.StatusCode)
+		return "", fmt.Errorf("failed to download file: HTTP %d", resp.StatusCode)
+	}
+
+	// Detect file type from Content-Type header
+	contentType := resp.Header.Get("Content-Type")
+	var fileExt string
+	switch contentType {
+	case "application/pdf":
+		fileExt = ".pdf"
+	case "image/jpeg", "image/jpg":
+		fileExt = ".jpg"
+	case "image/png":
+		fileExt = ".png"
+	default:
+		// Fallback: try to detect from URL
+		if strings.HasSuffix(strings.ToLower(imageURL), ".pdf") {
+			fileExt = ".pdf"
+		} else if strings.HasSuffix(strings.ToLower(imageURL), ".png") {
+			fileExt = ".png"
+		} else {
+			fileExt = ".jpg" // default
+		}
 	}
 
 	// Create the output file
 	out, err := os.Create(filename)
 	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
+		return "", fmt.Errorf("failed to create file: %w", err)
 	}
 	defer out.Close()
 
 	// Copy the downloaded content to the file
 	_, err = io.Copy(out, resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to save image: %w", err)
+		return "", fmt.Errorf("failed to save file: %w", err)
 	}
 
-	return nil
+	return fileExt, nil
 }
 
 // --- New Analyze Receipt Handler (Phase 1 Complete Flow) ---
@@ -450,15 +472,16 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			return
 		}
 
-		// Generate unique filename for downloaded image
+		// Generate temporary filename (extension will be set after download)
 		uniqueID := uuid.New().String()
-		filename := filepath.Join(configs.UPLOAD_DIR, fmt.Sprintf("%s_%d.jpg", uniqueID, i))
+		tempFilename := filepath.Join(configs.UPLOAD_DIR, fmt.Sprintf("%s_%d.tmp", uniqueID, i))
 
-		// Download image from Azure Blob Storage
-		if err := downloadImageFromURL(imgRef.ImageURI, filename); err != nil {
+		// Download file from Azure Blob Storage (supports images and PDFs)
+		fileExt, err := downloadImageFromURL(imgRef.ImageURI, tempFilename)
+		if err != nil {
 			reqCtx.EndStep("failed", nil, err)
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":       "Failed to download image from Azure Blob Storage",
+				"error":       "Failed to download file from Azure Blob Storage",
 				"details":     err.Error(),
 				"image_uri":   imgRef.ImageURI,
 				"image_index": i,
@@ -467,8 +490,23 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			return
 		}
 
+		// Rename file with correct extension
+		finalFilename := filepath.Join(configs.UPLOAD_DIR, fmt.Sprintf("%s_%d%s", uniqueID, i, fileExt))
+		if err := os.Rename(tempFilename, finalFilename); err != nil {
+			os.Remove(tempFilename) // cleanup
+			reqCtx.EndStep("failed", nil, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":       "Failed to save downloaded file",
+				"details":     err.Error(),
+				"request_id":  reqCtx.RequestID,
+			})
+			return
+		}
+
+		reqCtx.LogInfo("Downloaded file %d: %s (type: %s)", i, filepath.Base(finalFilename), fileExt)
+
 		downloadedImages = append(downloadedImages, ImageData{
-			Filename: filename,
+			Filename: finalFilename,
 			Index:    i,
 			GUID:     imgRef.DocumentImageGUID,
 			URI:      imgRef.ImageURI,
@@ -1245,11 +1283,11 @@ func TestTemplateHandler(c *gin.Context) {
 	}
 	defer file.Close()
 
-	// Validate file type
+	// Validate file type (support both images and PDF)
 	contentType := header.Header.Get("Content-Type")
-	if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/jpg" {
+	if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/jpg" && contentType != "application/pdf" {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "Invalid file type. Only JPG/PNG images are allowed",
+			"error":   "Invalid file type. Only JPG/PNG images and PDF files are allowed",
 			"details": fmt.Sprintf("Received: %s", contentType),
 		})
 		return

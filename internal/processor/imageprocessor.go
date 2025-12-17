@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -126,6 +127,16 @@ func preprocessImageFast(imagePath string) ([]byte, string, error) {
 
 // PreprocessImageHighQuality applies intelligent adaptive processing for maximum accuracy (Phase 2)
 func PreprocessImageHighQuality(imagePath string) ([]byte, string, error) {
+	// Check if file is PDF - skip preprocessing and return raw bytes
+	ext := strings.ToLower(filepath.Ext(imagePath))
+	if ext == ".pdf" {
+		pdfData, err := os.ReadFile(imagePath)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to read PDF: %w", err)
+		}
+		return pdfData, "application/pdf", nil
+	}
+
 	// Read the original image
 	img, err := imaging.Open(imagePath)
 	if err != nil {
@@ -166,7 +177,7 @@ func PreprocessImageHighQuality(imagePath string) ([]byte, string, error) {
 
 	// Step 5: Encode with high quality
 	var buf bytes.Buffer
-	ext := strings.ToLower(filepath.Ext(imagePath))
+	// ext already declared above for PDF check, reuse it
 	mimeType := "image/jpeg"
 
 	switch ext {

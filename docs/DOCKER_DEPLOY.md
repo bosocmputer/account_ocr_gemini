@@ -36,14 +36,25 @@ docker-compose down
 # Health check
 curl http://localhost:8080/health
 
-# Analyze receipt
+# Analyze receipt (supports both PDF and Image)
 curl -X POST http://localhost:8080/api/v1/analyze-receipt \
   -H "Content-Type: application/json" \
   -d '{
     "shopid": "SHOP001",
     "imagereferences": [{
       "documentimageguid": "test-guid",
-      "imageuri": "https://your-blob-storage.com/image.jpg"
+      "imageuri": "https://your-blob-storage.com/receipt.jpg"
+    }]
+  }'
+
+# Analyze PDF receipt
+curl -X POST http://localhost:8080/api/v1/analyze-receipt \
+  -H "Content-Type: application/json" \
+  -d '{
+    "shopid": "SHOP001",
+    "imagereferences": [{
+      "documentimageguid": "test-pdf-guid",
+      "imageuri": "https://your-blob-storage.com/receipt.pdf"
     }]
   }'
 ```
