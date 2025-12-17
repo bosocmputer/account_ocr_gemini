@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24.5-alpine AS builder
+FROM golang:1.22-alpine3.19 AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git
@@ -22,7 +22,7 @@ COPY configs/ configs/
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/api
 
 # Runtime stage
-FROM alpine:latest
+FROM alpine:3.19
 
 # Install ca-certificates for HTTPS
 RUN apk --no-cache add ca-certificates
