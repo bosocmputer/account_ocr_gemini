@@ -52,6 +52,11 @@ func main() {
 		c.Next()
 	})
 
+	// Root endpoint for SSL verification
+	router.GET("/", func(c *gin.Context) {
+		c.String(200, "ok")
+	})
+
 	// Health check endpoint
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{
