@@ -13,12 +13,26 @@ import (
 var (
 	// Gemini AI Configuration
 	GEMINI_API_KEY string
-	MODEL_NAME     string
 
-	// Gemini Pricing Configuration (per 1M tokens in USD)
-	GEMINI_INPUT_PRICE_PER_MILLION  float64
-	GEMINI_OUTPUT_PRICE_PER_MILLION float64
-	USD_TO_THB                      float64
+	// Phase-specific Model Configuration
+	OCR_MODEL_NAME                 string
+	TEMPLATE_MODEL_NAME            string
+	TEMPLATE_ACCOUNTING_MODEL_NAME string // For template-only mode (high confidence)
+	ACCOUNTING_MODEL_NAME          string // For full analysis mode (low confidence)
+
+	// Gemini Pricing Configuration (hardcoded based on official Gemini API pricing)
+	// Gemini 2.5 Flash-Lite: $0.10 input, $0.40 output per 1M tokens
+	// Gemini 2.5 Flash: $0.30 input, $2.50 output per 1M tokens
+	OCR_INPUT_PRICE_PER_MILLION                  = 0.10
+	OCR_OUTPUT_PRICE_PER_MILLION                 = 0.40
+	TEMPLATE_INPUT_PRICE_PER_MILLION             = 0.10
+	TEMPLATE_OUTPUT_PRICE_PER_MILLION            = 0.40
+	TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION  = 0.10
+	TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION = 0.40
+	ACCOUNTING_INPUT_PRICE_PER_MILLION           = 0.30
+	ACCOUNTING_OUTPUT_PRICE_PER_MILLION          = 2.50
+
+	USD_TO_THB float64 // Exchange rate from .env
 
 	// Server Configuration
 	PORT            string
@@ -60,12 +74,16 @@ func LoadConfig() {
 		log.Fatal("GEMINI_API_KEY environment variable is required")
 	}
 
-	// Optional with defaults
-	MODEL_NAME = getEnv("MODEL_NAME", "gemini-2.5-flash")
+	// Phase-specific models (customizable via .env)
+	OCR_MODEL_NAME = getEnv("OCR_MODEL_NAME", "gemini-2.5-flash-lite")
+	TEMPLATE_MODEL_NAME = getEnv("TEMPLATE_MODEL_NAME", "gemini-2.5-flash-lite")
+	TEMPLATE_ACCOUNTING_MODEL_NAME = getEnv("TEMPLATE_ACCOUNTING_MODEL_NAME", "gemini-2.5-flash-lite")
+	ACCOUNTING_MODEL_NAME = getEnv("ACCOUNTING_MODEL_NAME", "gemini-2.5-flash")
 
-	// Gemini Pricing (default to Flash-Lite pricing)
-	GEMINI_INPUT_PRICE_PER_MILLION = getEnvFloat("GEMINI_INPUT_PRICE_PER_MILLION", 0.10)
-	GEMINI_OUTPUT_PRICE_PER_MILLION = getEnvFloat("GEMINI_OUTPUT_PRICE_PER_MILLION", 0.40)
+	// Pricing is hardcoded based on official Gemini API rates
+	// No need to configure in .env - automatically matches model selection
+
+	// Exchange rate (customizable via .env)
 	USD_TO_THB = getEnvFloat("USD_TO_THB", 36.0)
 
 	PORT = getEnv("PORT", "8080")

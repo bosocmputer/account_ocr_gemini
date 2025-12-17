@@ -8,6 +8,7 @@ import (
 
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -68,9 +69,10 @@ type ShopName struct {
 
 // ShopProfile represents a shop's profile information
 type ShopProfile struct {
-	GuidFixed string     `bson:"guidfixed" json:"guidfixed"`
-	Names     []ShopName `bson:"names" json:"names"`
-	Settings  struct {
+	GuidFixed      string     `bson:"guidfixed" json:"guidfixed"`
+	Names          []ShopName `bson:"names" json:"names"`
+	PromptShopInfo string     `bson:"promptshopinfo" json:"promptshopinfo"` // Custom prompt describing business type and context
+	Settings       struct {
 		TaxID string `bson:"taxid" json:"taxid"`
 	} `bson:"settings" json:"settings"`
 }
@@ -262,4 +264,50 @@ func CreateDraft(draft ReceiptDraft) error {
 
 	fmt.Printf("✓ Draft created: %s\n", draft.DraftID)
 	return nil
+}
+
+// GetTemplateByID retrieves a single document template by guidfixed or ObjectID
+func GetTemplateByID(shopID string, templateID string) (bson.M, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	collection := mongoDB.Collection("documentFormate")
+
+	// Try to use as guidfixed first (more common use case)
+	filter := bson.M{
+		"guidfixed": templateID,
+		"shopid":    shopID,
+	}
+
+	log.Printf("🔍 Querying template - Database: %s, Collection: %s, Filter: %+v", mongoDB.Name(), collection.Name(), filter)
+
+	// Debug: Count total documents
+	totalCount, _ := collection.CountDocuments(ctx, bson.M{})
+	shopCount, _ := collection.CountDocuments(ctx, bson.M{"shopid": shopID})
+	log.Printf("📊 Collection stats - Total: %d, For shopid '%s': %d", totalCount, shopID, shopCount)
+
+	var template bson.M
+	err := collection.FindOne(ctx, filter).Decode(&template)
+
+	// If not found by guidfixed, try ObjectID
+	if err == mongo.ErrNoDocuments {
+		log.Printf("⚠️  Not found by guidfixed, trying ObjectID...")
+		objectID, objErr := primitive.ObjectIDFromHex(templateID)
+		if objErr == nil {
+			filter = bson.M{
+				"_id":    objectID,
+				"shopid": shopID,
+			}
+			err = collection.FindOne(ctx, filter).Decode(&template)
+		}
+	}
+
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("template not found with ID: %s", templateID)
+		}
+		return nil, fmt.Errorf("failed to query template: %w", err)
+	}
+
+	return template, nil
 }

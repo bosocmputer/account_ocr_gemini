@@ -61,8 +61,9 @@ func main() {
 		})
 	})
 
-	// Step 3: Define the API route
+	// Step 3: Define the API routes
 	router.POST("/api/v1/analyze-receipt", api.AnalyzeReceiptHandler)
+	router.POST("/api/v1/test-template", api.TestTemplateHandler)
 
 	// Step 4: Setup HTTP server with timeouts
 	srv := &http.Server{
@@ -76,7 +77,9 @@ func main() {
 	// Start server in a goroutine
 	go func() {
 		log.Printf("Starting server on :%s", configs.PORT)
-		log.Println("API Endpoint: POST /api/v1/analyze-receipt")
+		log.Println("API Endpoints:")
+		log.Println("  POST /api/v1/analyze-receipt")
+		log.Println("  POST /api/v1/test-template")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bosocmputer/account_ocr_gemini/configs"
@@ -20,7 +21,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -141,11 +141,13 @@ type ExtractRequest struct {
 
 // JournalEntry represents an accounting entry
 type JournalEntry struct {
-	AccountCode string  `json:"account_code"`
-	AccountName string  `json:"account_name"`
-	Debit       float64 `json:"debit"`
-	Credit      float64 `json:"credit"`
-	Description string  `json:"description"`
+	AccountCode     string  `json:"account_code"`
+	AccountName     string  `json:"account_name"`
+	Debit           float64 `json:"debit"`
+	Credit          float64 `json:"credit"`
+	Description     string  `json:"description"`
+	SelectionReason string  `json:"selection_reason"` // เหตุผลในการเลือกผังบัญชีนี้
+	SideReason      string  `json:"side_reason"`      // เหตุผลในการลงฝั่ง debit หรือ credit
 }
 
 // ValidateDoubleEntry checks if debits equal credits
@@ -190,6 +192,64 @@ func FetchDocumentFormate(shopID string) ([]bson.M, error) {
 	}
 
 	return templates, nil
+}
+
+// Helper functions for custom prompts extraction
+func extractShopContextForResponse(shopProfile interface{}) string {
+	if shopProfile == nil {
+		return ""
+	}
+
+	// Try multiple type assertions (same as gemini.go)
+	switch profile := shopProfile.(type) {
+	case bson.M:
+		if promptInfo, exists := profile["promptshopinfo"]; exists {
+			if promptStr, ok := promptInfo.(string); ok {
+				return promptStr
+			}
+		}
+	case map[string]interface{}:
+		if promptInfo, exists := profile["promptshopinfo"]; exists {
+			if promptStr, ok := promptInfo.(string); ok {
+				return promptStr
+			}
+		}
+	case *bson.M:
+		if promptInfo, exists := (*profile)["promptshopinfo"]; exists {
+			if promptStr, ok := promptInfo.(string); ok {
+				return promptStr
+			}
+		}
+	default:
+		// Try JSON marshal/unmarshal as fallback
+		jsonBytes, err := json.Marshal(shopProfile)
+		if err == nil {
+			var tempMap map[string]interface{}
+			if err := json.Unmarshal(jsonBytes, &tempMap); err == nil {
+				if promptInfo, exists := tempMap["promptshopinfo"]; exists {
+					if promptStr, ok := promptInfo.(string); ok {
+						return promptStr
+					}
+				}
+			}
+		}
+	}
+
+	return ""
+}
+
+func extractTemplateGuidanceForResponse(matchedTemplate *bson.M) string {
+	if matchedTemplate == nil {
+		return ""
+	}
+
+	if promptDesc, exists := (*matchedTemplate)["promptdescription"]; exists {
+		if promptStr, ok := promptDesc.(string); ok {
+			return promptStr
+		}
+	}
+
+	return ""
 }
 
 // Helper functions for type conversion
@@ -315,20 +375,6 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	reqCtx.LogInfo("✓ Master data validated: %d accounts, %d journal books, %d creditors, %d debtors",
 		len(masterCache.Accounts), len(masterCache.JournalBooks), len(masterCache.Creditors), len(masterCache.Debtors))
 
-	// 🔍 DEBUG: Show Creditors details
-	reqCtx.LogInfo("📋 Creditors List:")
-	for i, creditor := range masterCache.Creditors {
-		code := ""
-		name := ""
-		if c, ok := creditor["code"].(string); ok {
-			code = c
-		}
-		if n := extractNameFromNamesArray(creditor); n != "" {
-			name = n
-		}
-		reqCtx.LogInfo("  %d. Code: %s | Name: %s", i+1, code, name)
-	}
-
 	// ⚡ FETCH DOCUMENT FORMATE TEMPLATES (accounting patterns)
 	// This provides AI with predefined accounting entry templates for consistency
 	documentTemplates, err := FetchDocumentFormate(req.ShopID)
@@ -338,24 +384,6 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		documentTemplates = []bson.M{}
 	}
 	reqCtx.LogInfo("✓ Document templates loaded: %d templates found", len(documentTemplates))
-
-	// 🔍 DEBUG: Show Templates details
-	reqCtx.LogInfo("📋 Document Templates List:")
-	for i, tmpl := range documentTemplates {
-		id := ""
-		name := ""
-		desc := ""
-		if objID, ok := tmpl["_id"].(primitive.ObjectID); ok {
-			id = objID.Hex()
-		}
-		if n, ok := tmpl["name"].(string); ok {
-			name = n
-		}
-		if d, ok := tmpl["description"].(string); ok {
-			desc = d
-		}
-		reqCtx.LogInfo("  %d. ID: %s | Name: %s | Desc: %s", i+1, id, name, desc)
-	}
 
 	// Setup timeout context (5 minutes max for very complex receipts)
 	// Note: Complex receipts with many items can take 2-3 minutes
@@ -682,6 +710,58 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		len(accounts), len(masterCache.Accounts), len(journalBooks), len(creditors), len(debtors))
 	reqCtx.EndStep("success", nil, nil)
 
+	// Step 5.5: Pre-match vendors using fuzzy matching (before sending to AI)
+	reqCtx.LogInfo("\n┌── vendor_pre_matching")
+	var suggestedVendorCode string
+	var suggestedVendorName string
+	var matchMethod string
+	var matchSimilarity float64
+
+	// Initialize vendorMatchResult with empty values
+	vendorMatchResult := processor.VendorMatchResult{
+		Found:      false,
+		Code:       "",
+		Name:       "",
+		Similarity: 0,
+		Method:     "not_found",
+	}
+
+	// Try to extract vendor info from first OCR result
+	if len(pureOCRResults) > 0 && pureOCRResults[0].Result != nil {
+		ocrResult := pureOCRResults[0].Result
+		vendorNameFromOCR := ""
+		taxIDFromOCR := ""
+
+		// Extract vendor info from raw text (simple heuristic)
+		// First non-empty line is usually the vendor name
+		rawText := ocrResult.RawDocumentText
+		lines := strings.Split(rawText, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if trimmed != "" && len(trimmed) > 5 {
+				vendorNameFromOCR = trimmed
+				break
+			}
+		}
+
+		// Perform fuzzy matching
+		if vendorNameFromOCR != "" || taxIDFromOCR != "" {
+			vendorMatchResult = processor.MatchVendor(vendorNameFromOCR, masterCache.Creditors, taxIDFromOCR)
+			if vendorMatchResult.Found {
+				suggestedVendorCode = vendorMatchResult.Code
+				suggestedVendorName = vendorMatchResult.Name
+				matchMethod = vendorMatchResult.Method
+				matchSimilarity = vendorMatchResult.Similarity
+
+				reqCtx.LogInfo("✅ Vendor matched: '%s' → '%s' (code: %s, method: %s, %.1f%%)",
+					vendorNameFromOCR, suggestedVendorName, suggestedVendorCode, matchMethod, matchSimilarity)
+			} else {
+				reqCtx.LogInfo("⚠️  No vendor match found for: '%s'", vendorNameFromOCR)
+			}
+		}
+	}
+	reqCtx.LogInfo("└── ✅ สำเร็จ")
+
 	// Step 6: Phase 3 - AI Multi-Image Accounting Analysis (with conditional master data loading)
 	reqCtx.StartStep("phase3_multi_image_accounting")
 	reqCtx.LogInfo("Analyzing relationships between %d image(s) - Mode: %s", len(pureOCRResults), masterDataMode)
@@ -707,6 +787,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		debtors,
 		masterCache.ShopProfile,
 		documentTemplates,
+		&vendorMatchResult,
 		reqCtx,
 	)
 	if err != nil {
@@ -758,8 +839,87 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		}
 	}
 
-	// Step 8: Extract data safely (no draft saving)
+	// Step 7.5: Fill creditor info from vendor matching result
 	var accountingEntry map[string]interface{}
+	if ae, ok := accountingResponse["accounting_entry"].(map[string]interface{}); ok {
+		accountingEntry = ae
+	} else {
+		accountingEntry = map[string]interface{}{}
+	}
+
+	// 🔥 CRITICAL: Auto-fill creditor from vendor matching
+	if vendorMatchResult.Found {
+		// Override AI's creditor with Backend's matched result
+		accountingEntry["creditor_code"] = vendorMatchResult.Code
+		accountingEntry["creditor_name"] = vendorMatchResult.Name
+		reqCtx.LogInfo("✅ Auto-filled creditor from vendor matching: %s (code: %s)",
+			vendorMatchResult.Name, vendorMatchResult.Code)
+	}
+
+	// Step 7.6: Calculate weighted confidence score
+	reqCtx.StartStep("calculate_confidence")
+	confidenceResult := processor.CalculateWeightedConfidence(
+		&templateMatchResult,
+		&vendorMatchResult,
+		accountingEntry,
+		reqCtx,
+	)
+
+	// Replace AI's confidence with calculated weighted confidence
+	validationData := map[string]interface{}{
+		"confidence": map[string]interface{}{
+			"level": confidenceResult.OverallLevel,
+			"score": confidenceResult.OverallScore,
+		},
+		"requires_review": confidenceResult.RequiresReview,
+		"confidence_breakdown": map[string]interface{}{
+			"factors": map[string]interface{}{
+				"template_match":     confidenceResult.Factors.TemplateMatch,
+				"vendor_match":       confidenceResult.Factors.VendorMatch,
+				"data_completeness":  confidenceResult.Factors.DataCompleteness,
+				"field_validation":   confidenceResult.Factors.FieldValidation,
+				"balance_validation": confidenceResult.Factors.BalanceValidation,
+			},
+			"explanations": confidenceResult.Breakdown,
+			"weights": map[string]interface{}{
+				"template_match":     processor.DefaultWeights.TemplateMatch * 100,
+				"vendor_match":       processor.DefaultWeights.VendorMatch * 100,
+				"data_completeness":  processor.DefaultWeights.DataCompleteness * 100,
+				"field_validation":   processor.DefaultWeights.FieldValidation * 100,
+				"balance_validation": processor.DefaultWeights.BalanceValidation * 100,
+			},
+		},
+	}
+
+	// Merge with existing validation data from AI (keep ai_explanation, etc.)
+	if existingValidation, ok := accountingResponse["validation"].(map[string]interface{}); ok {
+		// Keep AI's explanation but override confidence and requires_review
+		validationData["ai_explanation"] = existingValidation["ai_explanation"]
+		validationData["processing_notes"] = existingValidation["processing_notes"]
+		validationData["fields_requiring_review"] = existingValidation["fields_requiring_review"]
+
+		// Override AI's vendor_matching with Backend's result
+		if aiExplanation, ok := existingValidation["ai_explanation"].(map[string]interface{}); ok {
+			if vendorMatchResult.Found {
+				aiExplanation["vendor_matching"] = map[string]interface{}{
+					"found_in_document": vendorMatchResult.Name,
+					"matched_with":      vendorMatchResult.Code + " - " + vendorMatchResult.Name,
+					"matching_method":   vendorMatchResult.Method,
+					"confidence":        vendorMatchResult.Similarity,
+					"reason":            fmt.Sprintf("ระบบจับคู่ vendor สำเร็จด้วยวิธี %s (ความแม่นยำ %.1f%%)", vendorMatchResult.Method, vendorMatchResult.Similarity),
+				}
+			} else {
+				// Keep AI's not_found explanation
+			}
+			validationData["ai_explanation"] = aiExplanation
+		}
+	}
+
+	accountingResponse["validation"] = validationData
+	reqCtx.EndStep("success", nil, nil)
+
+	// Step 8: Extract data safely (no draft saving)
+	// Re-extract accountingEntry after confidence calculation
 	if ae, ok := accountingResponse["accounting_entry"].(map[string]interface{}); ok {
 		accountingEntry = ae
 
@@ -808,17 +968,6 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		}
 	} else {
 		accountingEntry = map[string]interface{}{}
-	}
-
-	var validationData map[string]interface{}
-	if vd, ok := accountingResponse["validation"].(map[string]interface{}); ok {
-		validationData = vd
-	} else {
-		// Fallback validation (Pure OCR doesn't have validation data)
-		validationData = map[string]interface{}{
-			"overall_confidence": map[string]interface{}{"level": "medium", "score": 75},
-			"requires_review":    true,
-		}
 	}
 
 	// Step 9: Prepare debug data if requested
@@ -928,6 +1077,12 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		// NEW: Template information - shows which template AI selected and why
 		"template_info": templateInfo,
 
+		// NEW: Custom prompts used for AI analysis
+		"custom_prompts": gin.H{
+			"shop_context":      extractShopContextForResponse(masterCache.ShopProfile),
+			"template_guidance": extractTemplateGuidanceForResponse(matchedTemplate),
+		},
+
 		// NEW: Source images metadata
 		"source_images": sourceImages,
 
@@ -936,15 +1091,39 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			"request_id":       reqCtx.RequestID,
 			"processed_at":     time.Now().Format(time.RFC3339),
 			"duration_sec":     summary["total_duration_sec"],
-			"cost_thb":         summary["token_usage"].(map[string]interface{})["cost_thb"],
 			"images_processed": len(downloadedImages),
+			"token_usage": gin.H{
+				"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
+				"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
+				"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
+				"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
+			},
 		},
 
 		// Note: IMPORTANT - Always verify request_id matches your request log!
 		// If IDs don't match, this might be a cached/wrong response.
+	}
 
-		// Debug data (only included if debug=true query parameter)
-		"debug_data": debugData,
+	// Add debug data only if debug mode is enabled
+	if debugData != nil {
+		response["debug_data"] = debugData
+	}
+
+	// Filter out internal fields from ai_explanation before sending response
+	if validationData != nil {
+		if aiExplanation, ok := validationData["ai_explanation"].(map[string]interface{}); ok {
+			// Remove evidence_from_receipt (ซ้ำกับ receipt{})
+			delete(aiExplanation, "evidence_from_receipt")
+
+			// Keep account_selection_logic but remove redundant fields
+			if accountSelectionLogic, ok := aiExplanation["account_selection_logic"].(map[string]interface{}); ok {
+				// Keep only template_used and template_details for user reference
+				// Remove debit_accounts/credit_accounts (ซ้ำกับ entries[] 100%)
+				delete(accountSelectionLogic, "debit_accounts")
+				delete(accountSelectionLogic, "credit_accounts")
+				delete(accountSelectionLogic, "verification")
+			}
+		}
 	}
 
 	// Signal completion
@@ -963,4 +1142,403 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	default:
 		c.JSON(http.StatusOK, response)
 	}
+}
+
+// TestTemplateHandler - Test a template with an uploaded image
+func TestTemplateHandler(c *gin.Context) {
+	// Step 1: Parse multipart form data
+	shopID := c.PostForm("shopid")
+	templateJSON := c.PostForm("template")
+
+	// Validate required fields
+	if shopID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "shopid is required",
+		})
+		return
+	}
+
+	if templateJSON == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "template is required (JSON string)",
+		})
+		return
+	}
+
+	// Parse template JSON
+	var template bson.M
+	if err := json.Unmarshal([]byte(templateJSON), &template); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid template JSON",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	// Validate required template fields
+	if _, ok := template["doccode"].(string); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "template must contain 'doccode' field (string)",
+		})
+		return
+	}
+	if _, ok := template["description"].(string); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "template must contain 'description' field (string)",
+		})
+		return
+	}
+	if _, ok := template["promptdescription"].(string); !ok {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "template must contain 'promptdescription' field (string)",
+		})
+		return
+	}
+
+	// Step 2: Get uploaded file
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "file is required",
+			"details": err.Error(),
+		})
+		return
+	}
+	defer file.Close()
+
+	// Validate file type
+	contentType := header.Header.Get("Content-Type")
+	if contentType != "image/jpeg" && contentType != "image/png" && contentType != "image/jpg" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid file type. Only JPG/PNG images are allowed",
+			"details": fmt.Sprintf("Received: %s", contentType),
+		})
+		return
+	}
+
+	// Create request context
+	reqCtx := common.NewRequestContext(shopID)
+
+	templateDocCode := "unknown"
+	if doccode, ok := template["doccode"].(string); ok {
+		templateDocCode = doccode
+	}
+
+	reqCtx.LogInfo("🧪 เริ่มทดสอบ Template | ShopID: %s | Template Code: %s | File: %s", shopID, templateDocCode, header.Filename)
+
+	// Step 3: Save file temporarily
+	tempFilename := fmt.Sprintf("%s_%s", uuid.New().String(), filepath.Ext(header.Filename))
+	tempFilePath := filepath.Join(configs.UPLOAD_DIR, tempFilename)
+
+	out, err := os.Create(tempFilePath)
+	if err != nil {
+		reqCtx.LogError("Failed to create temp file: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to save uploaded file",
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	_, err = io.Copy(out, file)
+	out.Close()
+	if err != nil {
+		os.Remove(tempFilePath)
+		reqCtx.LogError("Failed to write temp file: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to save uploaded file",
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	reqCtx.LogInfo("✅ File saved temporarily: %s (%.2f KB)", tempFilename, float64(header.Size)/1024)
+
+	// Step 4: Load master data
+	masterCache, err := storage.GetOrLoadMasterData(shopID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to load master data",
+			"details":    err.Error(),
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	reqCtx.LogInfo("✓ Master data validated: %d accounts, %d journal books, %d creditors, %d debtors",
+		len(masterCache.Accounts), len(masterCache.JournalBooks),
+		len(masterCache.Creditors), len(masterCache.Debtors))
+
+	// Step 5: Use provided template (no MongoDB query needed)
+	templateName := "Unknown Template"
+	if desc, ok := template["description"].(string); ok {
+		templateName = desc
+	}
+
+	reqCtx.LogInfo("✅ Template received: %s (Code: %s)", templateName, templateDocCode)
+
+	// Step 6: Process with OCR (Phase 1)
+	reqCtx.StartStep("pure_ocr_extraction_all")
+	reqCtx.LogInfo("Pure OCR extraction (raw text only) for 1 image(s)")
+
+	ocrResult, ocrTokens, err := ai.ProcessPureOCR(tempFilePath, reqCtx)
+	if err != nil {
+		reqCtx.LogError("OCR failed: %v", err)
+		reqCtx.EndStep("failed", nil, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "OCR processing failed",
+			"details":    err.Error(),
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	reqCtx.LogInfo("✓ Pure OCR completed for 1 image(s) - Token savings: ~82%% vs old method")
+	reqCtx.EndStep("success", ocrTokens, nil)
+
+	// Extract text from OCR result
+	ocrText := ocrResult.RawDocumentText
+	if ocrText == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to extract text from image",
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	// Create pure OCR result map for AI processing
+	fullResults := []map[string]interface{}{
+		{
+			"full_text": ocrText,
+			"metadata":  ocrResult.Metadata,
+		},
+	}
+
+	// Step 7: Force use the specified template (skip template matching)
+	reqCtx.LogInfo("\n┌── template_matching_analysis")
+	reqCtx.LogInfo("🧪 Force using template: %s (Test Mode)", templateName)
+
+	matchedTemplate := &template
+	templateMatchResult := map[string]interface{}{
+		"template_name": templateName,
+		"template_code": templateDocCode,
+		"confidence":    100, // Force 100% since user explicitly provided it
+		"mode":          "test",
+		"note":          "Template provided by user for testing - no AI matching performed",
+	}
+
+	reqCtx.LogInfo("└── ✅ สำเร็จ")
+
+	// Step 8: Process with accounting analysis (Phase 3)
+	reqCtx.LogInfo("\n┌── 📊 เตรียมข้อมูลหลัก (Master Data)")
+
+	// Filter accounts for non-VAT shops (use all accounts for test mode)
+	filteredAccounts := masterCache.Accounts
+
+	reqCtx.LogInfo("✓ Master data ready: %d accounts (filtered from %d), %d journal books, %d creditors, %d debtors",
+		len(filteredAccounts), len(masterCache.Accounts),
+		len(masterCache.JournalBooks), len(masterCache.Creditors), len(masterCache.Debtors))
+
+	reqCtx.LogInfo("└── ✅ สำเร็จ")
+
+	// Prepare downloadedImages metadata for accounting
+	downloadedImages := []map[string]interface{}{
+		{
+			"filename":    tempFilePath,
+			"image_index": 0,
+		},
+	}
+
+	// Convert ShopProfile to interface{} for AI processing
+	var shopProfileInterface interface{}
+	if masterCache.ShopProfile != nil {
+		shopProfileInterface = masterCache.ShopProfile
+	}
+
+	// Prepare document templates array
+	documentTemplates := []bson.M{template}
+
+	// Process accounting with forced template (use full_mode since we're testing)
+	reqCtx.StartStep("phase3_multi_image_accounting")
+
+	// Create empty vendor match result for test endpoint (no pre-matching)
+	emptyVendorMatchResult := processor.VendorMatchResult{
+		Found:      false,
+		Code:       "",
+		Name:       "",
+		Similarity: 0,
+		Method:     "not_found",
+	}
+
+	accountingResponseJSON, accountingTokens, err := ai.ProcessMultiImageAccountingAnalysis(
+		downloadedImages,
+		fullResults,
+		ai.FullMode, // Use full mode for testing to get complete analysis
+		matchedTemplate,
+		filteredAccounts,
+		masterCache.JournalBooks,
+		masterCache.Creditors,
+		masterCache.Debtors,
+		shopProfileInterface,
+		documentTemplates,
+		&emptyVendorMatchResult,
+		reqCtx,
+	)
+	reqCtx.EndStep("success", accountingTokens, nil)
+
+	if err != nil {
+		reqCtx.LogError("Accounting analysis failed: %v", err)
+		reqCtx.EndStep("failed", nil, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Accounting analysis failed",
+			"details":    err.Error(),
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	// Parse accounting response JSON
+	var accountingResponse map[string]interface{}
+	if err := json.Unmarshal([]byte(accountingResponseJSON), &accountingResponse); err != nil {
+		reqCtx.LogError("Failed to parse accounting response: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "Failed to parse accounting response",
+			"details":    err.Error(),
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	// Step 9: Build response (same structure as analyze-receipt)
+	summary := reqCtx.GetSummary()
+
+	var documentAnalysis map[string]interface{}
+	if da, ok := accountingResponse["document_analysis"].(map[string]interface{}); ok {
+		documentAnalysis = da
+	} else {
+		documentAnalysis = map[string]interface{}{
+			"total_images": 1,
+			"relationship": "single_document",
+			"confidence":   99,
+		}
+	}
+
+	var sourceImages []interface{}
+	if si, ok := accountingResponse["source_images"].([]interface{}); ok {
+		sourceImages = si
+	}
+
+	// Extract template info with the forced template
+	templateInfo := processor.ExtractTemplateInfo(accountingResponse, documentTemplates, matchedTemplate, reqCtx)
+
+	var receiptData map[string]interface{}
+	if rd, ok := accountingResponse["receipt"].(map[string]interface{}); ok {
+		receiptData = rd
+	} else {
+		receiptData = gin.H{
+			"number":        "N/A",
+			"date":          "N/A",
+			"vendor_name":   "N/A",
+			"vendor_tax_id": "N/A",
+			"total":         0,
+			"vat":           0,
+		}
+	}
+
+	accountingEntry := accountingResponse["accounting_entry"]
+	validationData := accountingResponse["validation"]
+
+	// Add fields_requiring_review
+	fieldsRequiringReview := []string{}
+	if receiptData != nil {
+		if vendorName, ok := receiptData["vendor_name"].(string); ok && (vendorName == "Unknown Vendor" || vendorName == "N/A" || vendorName == "") {
+			fieldsRequiringReview = append(fieldsRequiringReview, "vendor_name")
+		}
+		if vendorTaxID, ok := receiptData["vendor_tax_id"].(string); ok && (vendorTaxID == "Unknown Vendor" || vendorTaxID == "N/A" || vendorTaxID == "") {
+			fieldsRequiringReview = append(fieldsRequiringReview, "vendor_tax_id")
+		}
+	}
+	if len(fieldsRequiringReview) > 0 {
+		if vd, ok := validationData.(map[string]interface{}); ok {
+			vd["fields_requiring_review"] = fieldsRequiringReview
+			if requiresReview, ok := vd["requires_review"].(bool); !ok || !requiresReview {
+				vd["requires_review"] = true
+			}
+		}
+	}
+
+	response := gin.H{
+		"shopid": shopID,
+		"status": "success",
+		"mode":   "test_template",
+
+		"document_analysis": documentAnalysis,
+		"receipt":           receiptData,
+		"accounting_entry":  accountingEntry,
+		"validation":        validationData,
+		"template_info":     templateInfo,
+
+		"custom_prompts": gin.H{
+			"shop_context":      extractShopContextForResponse(shopProfileInterface),
+			"template_guidance": extractTemplateGuidanceForResponse(matchedTemplate),
+		},
+
+		"source_images": sourceImages,
+
+		"metadata": gin.H{
+			"request_id":       reqCtx.RequestID,
+			"processed_at":     time.Now().Format(time.RFC3339),
+			"duration_sec":     summary["total_duration_sec"],
+			"images_processed": 1,
+			"test_mode":        true,
+			"template_code":    templateDocCode,
+			"token_usage": gin.H{
+				"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
+				"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
+				"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
+				"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
+			},
+		},
+
+		"template_match": templateMatchResult,
+	}
+
+	// Filter out internal fields from ai_explanation
+	if validationData != nil {
+		if vd, ok := validationData.(map[string]interface{}); ok {
+			if aiExplanation, ok := vd["ai_explanation"].(map[string]interface{}); ok {
+				delete(aiExplanation, "evidence_from_receipt")
+				if accountSelectionLogic, ok := aiExplanation["account_selection_logic"].(map[string]interface{}); ok {
+					delete(accountSelectionLogic, "debit_accounts")
+					delete(accountSelectionLogic, "credit_accounts")
+					delete(accountSelectionLogic, "verification")
+				}
+			}
+		}
+	}
+
+	reqCtx.LogInfo("═══ 🎯 สรุปผล (Test Mode) ═══")
+	reqCtx.LogInfo("⏱️  เวลารวม: %.2fวินาที | 🪙 Tokens: %s | 💰 ค่าใช้จ่าย: %s",
+		summary["total_duration_sec"],
+		formatTokenSummary(summary["token_usage"].(map[string]interface{})),
+		summary["token_usage"].(map[string]interface{})["cost_thb"])
+	reqCtx.LogInfo("✅ ทดสอบเทมเพลต: '%s' สำเร็จ", templateName)
+	reqCtx.LogInfo("═══════════════════════════")
+
+	// Delete temp file after successful processing
+	if err := os.Remove(tempFilePath); err != nil {
+		reqCtx.LogWarning("⚠️  Failed to delete temp file: %v", err)
+	} else {
+		reqCtx.LogInfo("🗑️  Deleted temp file: %s", tempFilename)
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// formatTokenSummary formats token usage for logging
+func formatTokenSummary(tokenUsage map[string]interface{}) string {
+	input := tokenUsage["total_input_tokens"]
+	output := tokenUsage["total_output_tokens"]
+	total := tokenUsage["total_tokens"]
+	return fmt.Sprintf("%vเข้า + %vออก = %vรวม", input, output, total)
 }

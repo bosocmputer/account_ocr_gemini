@@ -64,16 +64,36 @@ func AnalyzeTemplateMatch(
 
 	for _, template := range templates {
 		description, ok := template["description"].(string)
+		promptDescription, promptOk := template["promptdescription"].(string)
+
+		// Build combined description for AI matching
+		var combinedDesc string
 		if ok && description != "" {
-			templateDescriptions = append(templateDescriptions, description)
-			templateMap[description] = template
+			combinedDesc = description
+			// Add promptdescription if available (gives more context for AI)
+			if promptOk && promptDescription != "" {
+				combinedDesc = description + " | " + promptDescription
+			}
+		} else if promptOk && promptDescription != "" {
+			// Fallback: use only promptdescription if description is empty
+			combinedDesc = promptDescription
+		}
+
+		if combinedDesc != "" {
+			templateDescriptions = append(templateDescriptions, combinedDesc)
+			// Map with original description as key for backward compatibility
+			if ok && description != "" {
+				templateMap[description] = template
+			}
+			// Also map with combined description for better matching
+			templateMap[combinedDesc] = template
 		}
 	}
 
 	if len(templateDescriptions) == 0 {
 		return TemplateMatchResult{
 			Confidence: 0,
-			Reason:     "ไม่มี template description ในระบบ",
+			Reason:     "ไม่มี template description/promptdescription ในระบบ",
 		}
 	}
 
@@ -99,6 +119,7 @@ func AnalyzeTemplateMatch(
 	// Find the matched template from map
 	// Try exact match first
 	matchedTemplate, found := templateMap[aiResult.MatchedTemplate]
+	matchedDescription := aiResult.MatchedTemplate
 
 	// If not found, try fuzzy matching (handle typos/variations)
 	if !found {
@@ -130,6 +151,7 @@ func AnalyzeTemplateMatch(
 		if bestSimilarity > 0.75 {
 			reqCtx.LogInfo("✅ Fuzzy match found: '%s' (similarity: %.1f%%)", bestDescription, bestSimilarity*100)
 			matchedTemplate = bestTemplate
+			matchedDescription = bestDescription
 			found = true
 		} else {
 			reqCtx.LogInfo("❌ No similar template found (best: %.1f%%)", bestSimilarity*100)
@@ -140,12 +162,19 @@ func AnalyzeTemplateMatch(
 		}
 	}
 
+	// Extract original description (before |) for return value
+	originalDescription := matchedDescription
+	if strings.Contains(matchedDescription, " | ") {
+		parts := strings.Split(matchedDescription, " | ")
+		originalDescription = strings.TrimSpace(parts[0])
+	}
+
 	// Return AI's decision
 	bestMatch := TemplateMatchResult{
 		Template:        matchedTemplate,
 		Confidence:      float64(aiResult.Confidence),
 		MatchedKeywords: []string{}, // AI doesn't use keywords
-		Description:     aiResult.MatchedTemplate,
+		Description:     originalDescription,
 		TemplateID:      matchedTemplate["_id"],
 		Reason:          aiResult.Reasoning,
 	}
@@ -465,7 +494,9 @@ func callGeminiForTemplateMatch(documentText string, templateDescriptions []stri
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel(configs.MODEL_NAME)
+	// Use Template Matching-specific model for Phase 2
+	model := client.GenerativeModel(configs.TEMPLATE_MODEL_NAME)
+	reqCtx.LogInfo("🔍 Phase 2 - Template Model: %s", configs.TEMPLATE_MODEL_NAME)
 
 	// Step 2: Define the JSON schema for template matching
 	schema := createTemplateMatchSchemaLocal()
@@ -539,10 +570,10 @@ func callGeminiForTemplateMatch(documentText string, templateDescriptions []stri
 		return nil, nil, fmt.Errorf("failed to unmarshal JSON response: %w", err)
 	}
 
-	// Step 7: Extract token usage
+	// Step 7: Extract token usage using Template-specific pricing (Phase 2)
 	var tokenUsage *common.TokenUsage
 	if resp.UsageMetadata != nil {
-		tokens := common.CalculateTokenCost(
+		tokens := common.CalculateTemplateTokenCost(
 			int(resp.UsageMetadata.PromptTokenCount),
 			int(resp.UsageMetadata.CandidatesTokenCount),
 		)
@@ -571,6 +602,8 @@ func getTemplateMatchingPromptLocal(documentText string, templateDescriptions []
 📋 Template ทางบัญชีที่มีในระบบ
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+ℹ️ Format: Template Description | Additional Context (if available)
+
 `
 
 	for i, desc := range templateDescriptions {
@@ -589,8 +622,9 @@ func getTemplateMatchingPromptLocal(documentText string, templateDescriptions []
 - ดูคำสำคัญในเอกสาร
 
 **ขั้นตอนที่ 2: เปรียบเทียบกับ Template**
-- ดู description ของแต่ละ template
-- หาความเกี่ยวข้องระหว่างเอกสารกับ template description
+- ดูทั้งส่วน description หลัก และ additional context (หลัง | )
+- Additional context ให้ข้อมูลเพิ่มเติมเช่น: ผู้ขาย, ประเภทสินค้า, วัตถุประสงค์
+- หาความเกี่ยวข้องระหว่างเอกสารกับ template ทั้งสองส่วน
 - ใช้ความรู้ทางบัญชีและธุรกิจในการตัดสิน
 
 **ตัวอย่างการวิเคราะห์:**

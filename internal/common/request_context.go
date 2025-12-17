@@ -140,12 +140,75 @@ func (rc *RequestContext) EndStep(status string, tokens *TokenUsage, err error) 
 }
 
 // CalculateTokenCost computes USD and THB cost from token counts
+// Deprecated: Use phase-specific functions (CalculateOCRTokenCost, CalculateTemplateTokenCost, etc.)
+// Falls back to OCR pricing for backward compatibility
 func CalculateTokenCost(inputTokens, outputTokens int) TokenUsage {
+	// Use OCR pricing as default fallback
+	return CalculateOCRTokenCost(inputTokens, outputTokens)
+}
+
+// CalculateOCRTokenCost calculates cost for Phase 1 (OCR) using OCR-specific pricing
+func CalculateOCRTokenCost(inputTokens, outputTokens int) TokenUsage {
 	totalTokens := inputTokens + outputTokens
 
-	// Calculate cost based on pricing from config (supports different models)
-	inputCost := float64(inputTokens) * configs.GEMINI_INPUT_PRICE_PER_MILLION / 1_000_000
-	outputCost := float64(outputTokens) * configs.GEMINI_OUTPUT_PRICE_PER_MILLION / 1_000_000
+	inputCost := float64(inputTokens) * configs.OCR_INPUT_PRICE_PER_MILLION / 1_000_000
+	outputCost := float64(outputTokens) * configs.OCR_OUTPUT_PRICE_PER_MILLION / 1_000_000
+	costUSD := inputCost + outputCost
+	costTHB := costUSD * configs.USD_TO_THB
+
+	return TokenUsage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  totalTokens,
+		CostUSD:      costUSD,
+		CostTHB:      costTHB,
+	}
+}
+
+// CalculateTemplateTokenCost calculates cost for Phase 2 (Template Matching)
+func CalculateTemplateTokenCost(inputTokens, outputTokens int) TokenUsage {
+	totalTokens := inputTokens + outputTokens
+
+	inputCost := float64(inputTokens) * configs.TEMPLATE_INPUT_PRICE_PER_MILLION / 1_000_000
+	outputCost := float64(outputTokens) * configs.TEMPLATE_OUTPUT_PRICE_PER_MILLION / 1_000_000
+	costUSD := inputCost + outputCost
+	costTHB := costUSD * configs.USD_TO_THB
+
+	return TokenUsage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  totalTokens,
+		CostUSD:      costUSD,
+		CostTHB:      costTHB,
+	}
+}
+
+// CalculateTemplateAccountingTokenCost calculates cost for Phase 3 (Template-only mode)
+// Uses Flash-Lite pricing (faster & cheaper for high-confidence template matches)
+func CalculateTemplateAccountingTokenCost(inputTokens, outputTokens int) TokenUsage {
+	totalTokens := inputTokens + outputTokens
+
+	inputCost := float64(inputTokens) * configs.TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION / 1_000_000
+	outputCost := float64(outputTokens) * configs.TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION / 1_000_000
+	costUSD := inputCost + outputCost
+	costTHB := costUSD * configs.USD_TO_THB
+
+	return TokenUsage{
+		InputTokens:  inputTokens,
+		OutputTokens: outputTokens,
+		TotalTokens:  totalTokens,
+		CostUSD:      costUSD,
+		CostTHB:      costTHB,
+	}
+}
+
+// CalculateAccountingTokenCost calculates cost for Phase 3 (Full analysis mode)
+// Uses Flash pricing (better reasoning for low-confidence or complex cases)
+func CalculateAccountingTokenCost(inputTokens, outputTokens int) TokenUsage {
+	totalTokens := inputTokens + outputTokens
+
+	inputCost := float64(inputTokens) * configs.ACCOUNTING_INPUT_PRICE_PER_MILLION / 1_000_000
+	outputCost := float64(outputTokens) * configs.ACCOUNTING_OUTPUT_PRICE_PER_MILLION / 1_000_000
 	costUSD := inputCost + outputCost
 	costTHB := costUSD * configs.USD_TO_THB
 

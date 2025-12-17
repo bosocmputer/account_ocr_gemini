@@ -89,6 +89,17 @@ func fixJSONEscaping(jsonStr string) string {
 	return result
 }
 
+// --- Helper Functions ---
+
+// getMapKeys returns all keys from a bson.M map for debugging
+func getMapKeys(m bson.M) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
 // --- Date Validation (Priority 1) ---
 
 func validateReceiptDate(dateStr string, result *ExtractionResult) error {
@@ -343,7 +354,9 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel(configs.MODEL_NAME)
+	// Use OCR-specific model for Phase 1
+	model := client.GenerativeModel(configs.OCR_MODEL_NAME)
+	reqCtx.LogInfo("📖 Phase 1 - OCR Model: %s", configs.OCR_MODEL_NAME)
 	reqCtx.EndSubStep("")
 
 	// Step 3: Define the simple JSON schema (raw text only)
@@ -359,7 +372,7 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 
 	// Step 5: Construct the prompt for Pure OCR (simplified)
 	reqCtx.StartSubStep("build_prompt")
-	// ใช้ Pure OCR prompt - อ่านแค่ข้อความ ไม่ต้อง extract structure
+	// ใช้ Pure OCR prompt จากไฟล์ prompt_ocr.go - อ่านแค่ข้อความดิบ
 	prompt := GetPureOCRPrompt()
 	reqCtx.EndSubStep("")
 
@@ -430,7 +443,7 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	// Step 8: Add AI metadata
 	reqCtx.StartSubStep("extract_metadata")
 	result.Metadata = AIMetadata{
-		ModelName: configs.MODEL_NAME,
+		ModelName: configs.OCR_MODEL_NAME,
 	}
 
 	// Extract token usage if available
@@ -440,8 +453,8 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 		result.Metadata.CandidatesTokens = resp.UsageMetadata.CandidatesTokenCount
 		result.Metadata.TotalTokens = resp.UsageMetadata.TotalTokenCount
 
-		// Calculate cost
-		tokens := common.CalculateTokenCost(
+		// Calculate cost using OCR-specific pricing (Phase 1)
+		tokens := common.CalculateOCRTokenCost(
 			int(resp.UsageMetadata.PromptTokenCount),
 			int(resp.UsageMetadata.CandidatesTokenCount),
 		)
@@ -775,15 +788,107 @@ func ParseFlexibleNumber(raw interface{}, confidence float64) FlexibleValue {
 
 // processMultiImageAccountingAnalysis analyzes multiple images and creates merged accounting entries
 // NEW: Supports conditional master data loading via mode parameter
-func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, mode MasterDataMode, matchedTemplate *bson.M, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, debtors []bson.M, shopProfile interface{}, documentTemplates []bson.M, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
+// Accepts vendorMatchResult to inform AI about pre-matched vendors from Backend
+func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResults interface{}, mode MasterDataMode, matchedTemplate *bson.M, accounts []bson.M, journalBooks []bson.M, creditors []bson.M, debtors []bson.M, shopProfile interface{}, documentTemplates []bson.M, vendorMatchResult *processor.VendorMatchResult, reqCtx *common.RequestContext) (string, *common.TokenUsage, error) {
 	// Convert all OCR results to JSON for AI analysis
 	allResultsJSON, _ := json.MarshalIndent(map[string]interface{}{
 		"full_ocr_results":  fullResults,
 		"downloaded_images": downloadedImages,
 	}, "", "  ")
 
+	// Build vendor matching info for AI
+	var vendorMatchInfo string
+	if vendorMatchResult != nil && vendorMatchResult.Found {
+		vendorMatchInfo = fmt.Sprintf(`
+🎯 PRE-MATCHED VENDOR (จาก Backend Fuzzy Matching):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ ระบบได้จับคู่ Vendor ให้แล้วโดยอัตโนมัติ:
+
+  Matched Code: %s
+  Matched Name: %s
+  Method: %s
+  Confidence: %.1f%%
+
+⚠️ สำคัญมาก:
+  - ใช้ creditor_code = "%s" และ creditor_name = "%s" โดยตรง
+  - ไม่ต้อง match ใหม่อีกครั้ง
+  - ไม่ต้องค้นหาใน Creditors list
+  - ในส่วน vendor_matching ให้ใส่:
+    * matched_with: "%s - %s"
+    * matching_method: "%s"
+    * confidence: %.1f
+    * reason: "ระบบจับคู่ vendor สำเร็จด้วยวิธี %s (ความแม่นยำ %.1f%%)"
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`,
+			vendorMatchResult.Code,
+			vendorMatchResult.Name,
+			vendorMatchResult.Method,
+			vendorMatchResult.Similarity,
+			vendorMatchResult.Code,
+			vendorMatchResult.Name,
+			vendorMatchResult.Code,
+			vendorMatchResult.Name,
+			vendorMatchResult.Method,
+			vendorMatchResult.Similarity,
+			vendorMatchResult.Method,
+			vendorMatchResult.Similarity,
+		)
+	} else {
+		vendorMatchInfo = ""
+	}
+
 	// Build multi-image accounting prompt with conditional master data
-	prompt := BuildMultiImageAccountingPrompt(string(allResultsJSON), mode, matchedTemplate, accounts, journalBooks, creditors, debtors, shopProfile, documentTemplates)
+	prompt := BuildMultiImageAccountingPrompt(string(allResultsJSON), mode, matchedTemplate, accounts, journalBooks, creditors, debtors, shopProfile, documentTemplates, vendorMatchInfo)
+
+	// Extract shop context for System Instruction
+	var shopContextForSystem string
+	if shopProfile != nil {
+		// Try multiple type assertions (suppressed verbose logging)
+		switch profile := shopProfile.(type) {
+		case bson.M:
+			if promptInfo, exists := profile["promptshopinfo"]; exists {
+				if promptStr, ok := promptInfo.(string); ok && promptStr != "" {
+					shopContextForSystem = promptStr
+				}
+			}
+		case map[string]interface{}:
+			if promptInfo, exists := profile["promptshopinfo"]; exists {
+				if promptStr, ok := promptInfo.(string); ok && promptStr != "" {
+					shopContextForSystem = promptStr
+				}
+			}
+		case *bson.M:
+			if promptInfo, exists := (*profile)["promptshopinfo"]; exists {
+				if promptStr, ok := promptInfo.(string); ok && promptStr != "" {
+					shopContextForSystem = promptStr
+				}
+			}
+		default:
+			// Try to convert via JSON
+			jsonBytes, err := json.Marshal(shopProfile)
+			if err == nil {
+				var tempMap map[string]interface{}
+				if err := json.Unmarshal(jsonBytes, &tempMap); err == nil {
+					if promptInfo, exists := tempMap["promptshopinfo"]; exists {
+						if promptStr, ok := promptInfo.(string); ok && promptStr != "" {
+							shopContextForSystem = promptStr
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Extract template guidance for System Instruction
+	var templateGuidanceForSystem string
+	if matchedTemplate != nil {
+		if promptDesc, exists := (*matchedTemplate)["promptdescription"]; exists {
+			if promptStr, ok := promptDesc.(string); ok && promptStr != "" {
+				templateGuidanceForSystem = promptStr
+				// Template guidance loaded (suppressed verbose logging)
+			}
+		}
+	}
 
 	// Call Gemini API
 	reqCtx.StartSubStep("init_gemini_client")
@@ -794,57 +899,31 @@ func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel(configs.MODEL_NAME)
+	// 🤖 Conditional Model Selection for Phase 3 (Smart Cost Optimization)
+	// Template-only mode (≥85% confidence): Flash-Lite = เร็ว + ประหยัด (~฿0.08-0.10)
+	// Full analysis mode (<85% confidence): Flash = ช้ากว่า + แพงกว่า + ฉลาดกว่า (~฿0.30-0.35)
+	var selectedModelName string
+	var modeDesc string
+	if mode == TemplateOnlyMode {
+		selectedModelName = configs.TEMPLATE_ACCOUNTING_MODEL_NAME
+		modeDesc = "Template-only (≥85%)"
+	} else {
+		selectedModelName = configs.ACCOUNTING_MODEL_NAME
+		modeDesc = "Full analysis (<85%)"
+	}
+	reqCtx.LogInfo("🤖 AI Model: %s [%s] → Cost-optimized selection", selectedModelName, modeDesc)
+
+	model := client.GenerativeModel(selectedModelName)
 	model.SetTemperature(0.2)
 
 	// 🚨 Set System Instruction - CRITICAL for Template Enforcement
 	// System instructions have higher priority than user prompts
+	// Use centralized function from prompt_accountant.go
+	systemInstructionText := BuildAccountantSystemInstruction(shopContextForSystem, templateGuidanceForSystem)
+
 	model.SystemInstruction = &genai.Content{
 		Parts: []genai.Part{
-			genai.Text(`You are a Thai accounting AI assistant. Your PRIMARY RULES:
-
-RULE #0 - WITHHOLDING TAX CERTIFICATES [HIGHEST PRIORITY]:
-For "หนังสือรับรองการหักภาษี ณ ที่จ่าย" (Withholding Tax Certificates):
-1. ALWAYS set template_used = false - NO EXCEPTIONS
-2. IGNORE any template matching with "บันทึกค่าทำบัญชี" or other templates
-3. These documents are TAX CERTIFICATES, not expense receipts
-4. Extract accounting entries from the certificate content:
-   - Check "Income Type" field (e.g., มาตรา 40(1), 40(2), 40(8))
-   - DO NOT look at "item descriptions" or "payment reasons"
-   - Use income type to determine account classification
-5. If income type is wages/salary (เงินเดือน) → Use Master Data accounts
-6. If income type is service fees (ค่าบริการ) → Use Master Data accounts
-7. NEVER match templates based on payment descriptions in tax certificates
-
-WHY: Withholding tax certificates record TAX DEDUCTIONS, not business expenses. 
-They require different accounting treatment than regular receipts.
-
-RULE #1 - TEMPLATE ENFORCEMENT:
-When template_used = true (a matching accounting template is found):
-1. You MUST use ONLY the accounts listed in template.details[]
-2. You CANNOT add any accounts beyond the template - NO EXCEPTIONS
-3. You CANNOT add tax accounts if template doesn't include them
-4. Even if the receipt shows VAT or Withholding Tax, if the template doesn't include tax accounts, DO NOT ADD THEM
-5. Template = User's explicit choice. Your job is to OBEY the template, not to apply accounting standards
-
-WHY: The user created this template to simplify accounting entries. If they wanted tax breakdown, they would have included tax accounts in the template.
-
-RULE #2 - MASTER DATA VALIDATION:
-ALL account codes MUST exist in the provided Master Data (Chart of Accounts):
-1. NEVER use account codes from your internal knowledge
-2. Each shop has different chart of accounts with different codes
-3. If template_used = true → codes come from template (already validated)
-4. If template_used = false → search Chart of Accounts, verify code exists
-5. DO NOT assume account code numbers (e.g., don't assume VAT = 115810)
-
-When template_used = false (no matching template):
-- You may use your accounting knowledge freely
-- Search for appropriate accounts in the provided Chart of Accounts
-- Verify ALL account codes exist in Master Data before using them
-
-Remember: RULE #0 (Withholding Tax) > RULE #1 (Templates) > Accounting standards
-Remember: OBEY template > Standard accounting practices
-Remember: Use ONLY account codes from provided Master Data`),
+			genai.Text(systemInstructionText),
 		},
 	}
 	reqCtx.EndSubStep("")
@@ -931,13 +1010,23 @@ Remember: Use ONLY account codes from provided Master Data`),
 		}
 	}
 
-	// Calculate token usage
+	// Calculate token usage with conditional pricing based on mode
 	var tokenUsage *common.TokenUsage
 	if resp.UsageMetadata != nil {
-		tokens := common.CalculateTokenCost(
-			int(resp.UsageMetadata.PromptTokenCount),
-			int(resp.UsageMetadata.CandidatesTokenCount),
-		)
+		var tokens common.TokenUsage
+		if mode == TemplateOnlyMode {
+			// Template-only: Use Flash-Lite pricing (cheaper)
+			tokens = common.CalculateTemplateAccountingTokenCost(
+				int(resp.UsageMetadata.PromptTokenCount),
+				int(resp.UsageMetadata.CandidatesTokenCount),
+			)
+		} else {
+			// Full analysis: Use Flash pricing (more expensive but better reasoning)
+			tokens = common.CalculateAccountingTokenCost(
+				int(resp.UsageMetadata.PromptTokenCount),
+				int(resp.UsageMetadata.CandidatesTokenCount),
+			)
+		}
 		tokenUsage = &tokens
 	}
 

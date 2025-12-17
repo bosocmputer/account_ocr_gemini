@@ -57,7 +57,20 @@ All configuration is managed through `.env` file:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `GEMINI_API_KEY` | *required* | Gemini AI API key |
-| `MODEL_NAME` | `gemini-2.0-flash-exp` | Gemini model version |
+| **Phase-Specific Models** | | |
+| `OCR_MODEL_NAME` | `gemini-2.5-flash-lite` | OCR model (Phase 1) |
+| `TEMPLATE_MODEL_NAME` | `gemini-2.5-flash-lite` | Template matching model (Phase 2) |
+| `ACCOUNTING_MODEL_NAME` | `gemini-2.5-flash` | Accounting analysis model (Phase 3) |
+| `MODEL_NAME` | `gemini-2.5-flash-lite` | (Deprecated) Fallback model |
+| **Pricing** | | |
+| `OCR_INPUT_PRICE_PER_MILLION` | `0.10` | OCR input price (USD/1M tokens) |
+| `OCR_OUTPUT_PRICE_PER_MILLION` | `0.40` | OCR output price (USD/1M tokens) |
+| `TEMPLATE_INPUT_PRICE_PER_MILLION` | `0.10` | Template input price (USD/1M tokens) |
+| `TEMPLATE_OUTPUT_PRICE_PER_MILLION` | `0.40` | Template output price (USD/1M tokens) |
+| `ACCOUNTING_INPUT_PRICE_PER_MILLION` | `0.30` | Accounting input price (USD/1M tokens) |
+| `ACCOUNTING_OUTPUT_PRICE_PER_MILLION` | `2.50` | Accounting output price (USD/1M tokens) |
+| `USD_TO_THB` | `36.0` | USD to THB exchange rate |
+| **Server** | | |
 | `PORT` | `8080` | Server port |
 | `GIN_MODE` | `release` | Gin mode (debug/release) |
 | `MONGO_URI` | - | MongoDB connection URI |

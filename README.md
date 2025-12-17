@@ -18,6 +18,7 @@
 - [การติดตั้ง](#-การติดตั้ง)
 - [API Documentation](#-api-documentation)
 - [โครงสร้างโปรเจกต์](#-โครงสร้างโปรเจกต์)
+- [📚 เอกสารเพิ่มเติม](#-เอกสารเพิ่มเติม)
 
 ---
 
@@ -122,6 +123,15 @@
    └─> Receipt data + Accounting entry + Validation
 ```
 
+### Model Pricing (per 1M tokens)
+
+| Model | Input (USD) | Output (USD) | Input (THB) | Output (THB) | Use Case |
+|-------|-------------|--------------|-------------|--------------|----------|
+| **2.0 Flash-Lite** | $0.075 | $0.30 | ฿2.70 | ฿10.80 | ถูกสุด แต่ OCR ไม่ดีเท่า 2.5 |
+| **2.5 Flash-Lite** | $0.10 | $0.40 | ฿3.60 | ฿14.40 | ⭐ OCR & Template (ปัจจุบัน) |
+| **2.5 Flash** | $0.30 | $2.50 | ฿10.80 | ฿90.00 | ⭐ Accounting Analysis (ปัจจุบัน) |
+| **2.5 Pro** | $1.25 | $10.00 | ฿45.00 | ฿360.00 | ❌ แพงเกินไป |
+
 ### Token Usage Comparison
 
 | Mode | Phase 2 (OCR) | Phase 2.5 (Matching) | Phase 3 (Analysis) | **Total** | Savings |
@@ -138,7 +148,11 @@
 |-----------|-----------|---------|
 | **Backend** | Go 1.24.5 | High-performance, concurrent processing |
 | **Framework** | Gin | HTTP web framework |
-| **AI** | Gemini 2.5 Flash | Vision AI for OCR & analysis |
+| **AI (OCR)** | Gemini 2.5 Flash-Lite | Thai OCR with better accuracy |
+| **AI (Template)** | Gemini 2.5 Flash-Lite | Fast template matching |
+| **AI (Accounting)** | Conditional Selection | Smart model switching based on confidence |
+| ↳ Template-only (≥85%) | Gemini 2.5 Flash-Lite | Fast & cheap for high-confidence cases |
+| ↳ Full analysis (<85%) | Gemini 2.5 Flash | Better reasoning for complex cases |
 | **Database** | MongoDB 6.0 | Master data storage |
 | **Caching** | In-memory | 5-minute TTL for master data |
 | **Image** | Disintegration/Imaging | Image preprocessing |
@@ -167,15 +181,44 @@ go mod download
 ```
 
 ### 2. Configuration
-แก้ไข `configs/config.go`:
-```go
-const (
-    GEMINI_API_KEY = "YOUR_GEMINI_API_KEY"
-    MODEL_NAME     = "gemini-2.5-flash"
-    MONGODB_URI    = "mongodb://localhost:27017"
-    MONGODB_DB     = "your_database"
-)
+สร้างไฟล์ `.env` (หรือแก้ไข `configs/config.go`):
+```env
+# Gemini AI API Key
+GEMINI_API_KEY=YOUR_GEMINI_API_KEY
+
+# Phase 1: OCR Model (เน้นความแม่นยำในการอ่านภาษาไทย)
+OCR_MODEL_NAME=gemini-2.5-flash-lite
+OCR_INPUT_PRICE_PER_MILLION=0.10
+OCR_OUTPUT_PRICE_PER_MILLION=0.40
+
+# Phase 2: Template Matching Model (เน้นความเร็วและประหยัด)
+TEMPLATE_MODEL_NAME=gemini-2.5-flash-lite
+TEMPLATE_INPUT_PRICE_PER_MILLION=0.10
+TEMPLATE_OUTPUT_PRICE_PER_MILLION=0.40
+
+# Phase 3: Accounting Analysis Model (Conditional Selection)
+# สำหรับเทมเพลต: ใช้ Flash-Lite (เร็ว ประหยัด) เมื่อความมั่นใจ ≥85%
+TEMPLATE_ACCOUNTING_MODEL_NAME=gemini-2.5-flash-lite
+TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION=0.10
+TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION=0.40
+
+# สำหรับวิเคราะห์เต็มรูปแบบ: ใช้ Flash (เน้น reasoning ซับซ้อน) เมื่อความมั่นใจ <85%
+ACCOUNTING_MODEL_NAME=gemini-2.5-flash
+ACCOUNTING_INPUT_PRICE_PER_MILLION=0.30
+ACCOUNTING_OUTPUT_PRICE_PER_MILLION=2.50
+
+# Exchange Rate
+USD_TO_THB=36.0
+
+# MongoDB
+MONGO_URI=mongodb://localhost:27017
+MONGO_DB_NAME=your_database
 ```
+
+**💡 Why Different Models?**
+- **OCR Phase**: 2.5 Flash-Lite มี OCR capability ดีกว่า 2.0 Flash-Lite (+33% cost แต่แม่นยำกว่า)
+- **Template Matching**: ใช้ Flash-Lite ก็เพียงพอ ไม่ต้องใช้ model แพง
+- **Accounting Analysis**: ต้องการ reasoning → ใช้ 2.5 Flash (คุณภาพสูงกว่า)
 
 ### 3. Setup MongoDB
 ต้องมี collections:
@@ -185,6 +228,39 @@ const (
 - `debtors` - ลูกหนี้
 - `documentFormate` - Templates ทางบัญชี
 - `shopProfile` - ข้อมูลร้านค้า
+
+#### 📋 Template Format (documentFormate collection)
+```json
+{
+  "_id": "template_id",
+  "shopid": "36gw9v2oP2Rmg98lIovlQ6Dbcfh",
+  "description": "ค่าน้ำมัน",
+  "promptdescription": "ซื้อน้ำมันเชื้อเพลิงจากปั๊ม เช่น บางจาก, ปตท, เชลล์, เอสโซ่, คาลเท็กซ์",
+  "bookcode": "02",
+  "details": [
+    {"accountcode": "531220", "detail": "ค่าน้ำมัน-ค่าแก๊สรถยนต์"},
+    {"accountcode": "111110", "detail": "เงินสดในมือ"}
+  ]
+}
+```
+
+**คำอธิบาย fields:**
+- `description`: ชื่อ template หลัก (แสดงให้ user เห็น)
+- `promptdescription`: **(ใหม่!)** บริบทเพิ่มเติมสำหรับ AI เพื่อเลือก template ให้ถูกต้อง
+  - ระบุคีย์เวิร์ด, ชื่อผู้ขาย, ประเภทสินค้า/บริการ
+  - ยิ่งระบุชัดเจน AI จะเลือกได้แม่นยำมากขึ้น
+  - ตัวอย่าง:
+    - ค่าทำบัญชี: "บริการทำบัญชีจากบริษัท ซีแอนฮิล, AAA Accounting"
+    - ค่าไฟฟ้า: "ค่าไฟฟ้าจาก การไฟฟ้านครหลวง (MEA), การไฟฟ้าส่วนภูมิภาค (PEA)"
+    - ค่าอินเทอร์เน็ต: "ค่าบริการอินเทอร์เน็ตจาก True, AIS, 3BB"
+- `bookcode`: รหัสสมุดรายวันที่ใช้
+- `details`: รายการบัญชีที่ต้องใช้ทุกครั้ง
+
+**💡 Tips สำหรับ promptdescription ที่ดี:**
+- ✅ ระบุชื่อบริษัท/ผู้ขายที่ชัดเจน
+- ✅ ใช้คำที่มักปรากฏในเอกสารจริง
+- ✅ ระบุทั้งชื่อเต็มและชื่อย่อ (เช่น "MEA, การไฟฟ้านครหลวง")
+- ❌ อย่าใช้คำที่กว้างเกินไป (เช่น "ค่าใช้จ่ายทั่วไป")
 
 ### 4. Run Server
 ```bash
@@ -317,9 +393,13 @@ bill_scan_project/
 - **New**: อ่านข้อความ → จับคู่ template → วิเคราะห์ (10-17K tokens)
 
 ### Template Matching
-- AI วิเคราะห์ความเหมือนระหว่างเอกสารกับ template
-- Threshold 85%: confidence ≥ 85% → template-only mode
-- Template มีบัญชีที่กำหนดไว้ → ใช้เหมือนเดิมทุกครั้ง
+- **AI-Driven Matching**: AI วิเคราะห์ความเหมือนระหว่างเอกสารกับ template
+- **Dual Description System**: 
+  - `description`: ชื่อ template หลัก (เช่น "ค่าน้ำมัน")
+  - `promptdescription`: บริบทเพิ่มเติมสำหรับ AI (เช่น "ซื้อน้ำมันจากปั๊ม บางจาก, ปตท, เชลล์")
+- **Threshold 85%**: confidence ≥ 85% → template-only mode
+- **Consistent Entries**: Template มีบัญชีที่กำหนดไว้ → ใช้เหมือนเดิมทุกครั้ง
+- **Fuzzy Matching**: ยอมรับความต่างเล็กน้อย (typo, ตัวสะกด) ด้วย similarity > 75%
 
 ### Thai Accounting Rules
 - แยกแยะ: **บริการ** (ค่าที่ปรึกษา) vs **วัสดุ** (ค่าเบ็ดเตล็ด)
@@ -328,7 +408,35 @@ bill_scan_project/
 
 ---
 
-## 📝 Recent Updates
+## � เอกสารเพิ่มเติม
+
+- 📖 [Model Configuration Guide](docs/MODEL_CONFIGURATION.md) - อธิบาย phase-specific models และ pricing
+- 🏗️ [System Design](docs/SYSTEM_DESIGN.md) - สถาปัตยกรรมและ flow การทำงาน
+- 🐳 [Docker Deployment](docs/DOCKER_DEPLOY.md) - การ deploy ด้วย Docker
+- ⚡ [Rate Limiting Solutions](docs/RATE_LIMITING_SOLUTIONS.md) - แก้ปัญหา API rate limit
+
+---
+
+## �📝 Recent Updates
+
+### v2.3 - Conditional Model Selection (Dec 16, 2025)
+- ✅ **Smart model switching** - Phase 3 เลือก model ตาม template confidence
+- ✅ **Cost optimization** - Template-only mode (≥85%) ใช้ Flash-Lite แทน Flash
+- ✅ **Performance boost** - ลดเวลาและต้นทุนใน template-only mode ~70%
+- ✅ **Better accuracy maintained** - Full mode (<85%) ยังใช้ Flash reasoning เต็มรูปแบบ
+- ✅ **Thai comments** - ไฟล์ .env เปลี่ยนเป็นภาษาไทยทั้งหมด
+
+**Cost Improvement:**
+- Template-only mode (≥85% confidence): ฿0.08-0.10/request (ลด ~70% จาก v2.2)
+- Full mode (<85% confidence): ฿0.30-0.35/request (ใช้ Flash reasoning เต็มรูปแบบ)
+- **Smart tradeoff**: ประหยัดเมื่อเป็นไปได้ แต่รักษาคุณภาพเมื่อจำเป็น
+
+### v2.2 - Phase-Specific Models (Dec 16, 2025)
+- ✅ **Separated AI models by phase** - OCR, Template Matching, Accounting Analysis
+- ✅ **OCR Model upgraded** - 2.5 Flash-Lite (better Thai OCR than 2.0)
+- ✅ **Accounting Model upgraded** - 2.5 Flash (better reasoning capability)
+- ✅ **Flexible configuration** - Phase-specific pricing in .env
+- ✅ **Backward compatible** - Old MODEL_NAME still works as fallback
 
 ### v2.1 - Rate Limiting & Reliability (Dec 2025)
 - ✅ **Fixed HTTP 429 errors** - Implemented sequential processing (1 worker)

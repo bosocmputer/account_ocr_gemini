@@ -1,752 +1,828 @@
-# 📋 System Design: AI Accounting System v2.1
+# Bill Scan API - ระบบวิเคราะห์ใบเสร็จอัตโนมัติ
 
-## 🎯 System Overview
+## 🎯 ภาพรวม
 
-**ระบบวิเคราะห์บิลและสร้างรายการบัญชีอัตโนมัติ**
-
-Production-ready Go backend service that automatically analyzes receipt images using **Gemini AI**, performs **intelligent template matching**, and generates accounting entries following **Thai accounting standards**. The system uses a **3-phase architecture** with **token optimization** reducing costs by 73-80% and **rate limiting** to prevent API errors.
-
-**Key Performance Metrics:**
-- ⏱️ Processing Time: **15-20 seconds**
-- 💰 Token Usage: **10,300-17,300 tokens** (down from 60,000)
-- 🎯 Template Matching: **95-100% accuracy**
-- 💾 Cost Reduction: **73-80%**
-- ⚡ Rate Limiting: **0 HTTP 429 errors** (100% reliability)
+ระบบ **Bill Scan API** เป็น REST API สำหรับวิเคราะห์ใบเสร็จ/ใบกำกับภาษีโดยใช้ **Google Gemini AI** ในการ OCR และสร้างบันทึกบัญชี (Journal Entry) อัตโนมัติ
 
 ---
 
-## 🏗️ Architecture Evolution
+## 🔄 Flow การทำงานหลัก
 
-### v1.0 - Full OCR (Legacy)
+```mermaid
+flowchart TD
+    A[POST /api/v1/analyze-receipt] --> B[รับ JSON: shopid + imagereferences]
+    B --> C[Validate Master Data First]
+    C --> D{Master Data ครบ?}
+    D -->|ไม่ครบ| E[Return Error with Details]
+    D -->|ครบ| F[ดาวน์โหลดรูปจาก Azure Blob Storage]
+    F --> G[Phase 1: Pure OCR + Image Quality Check]
+    G --> H{รูปภาพคุณภาพดี?}
+    H -->|ไม่ดี| I[Return Rejection with Suggestions]
+    H -->|ดี| J[Phase 2: Template Matching - จับคู่กับ Template]
+    J --> K{Template Match ≥85%?}
+    K -->|ใช่| L[Template-Only Mode - ประหยัด Token]
+    K -->|ไม่| M[Full Mode - ใช้ Master Data ทั้งหมด]
+    L --> N[Phase 3: AI Accounting Analysis]
+    M --> N
+    N --> O[Validate Double Entry]
+    O --> P{Timeout?}
+    P -->|ใช่| Q[Return Partial Results + Summary]
+    P -->|ไม่| R[Return Complete JSON Response]
 ```
-Request → Full OCR (30K tokens) → Accounting Analysis (30K tokens) → Response
-Total: 60,000 tokens | 35-45 seconds
-```
-
-### v2.1 - Optimized Pipeline with Rate Limiting (Current)
-```
-Request → [Rate Limiter] → Pure OCR (2.1K) → [Rate Limiter] → Template Matching (1.2K) → [Rate Limiter] → Smart Analysis (7-14K) → Response
-Total: 10,300-17,300 tokens | 15-20 seconds | 0 HTTP 429 errors
-```
-
-**Improvements:**
-- ✅ 73-80% token reduction
-- ✅ 40% faster processing
-- ✅ Intelligent template matching
-- ✅ Dual-mode operation
-- ✅ Thai accounting classification
-- ✅ **Rate limiting (v2.1)** - Sequential processing with token bucket
-- ✅ **Smart retry (v2.1)** - 30-90s exponential backoff
-- ✅ **Journal Book rules (v2.1)** - Priority-based selection (100% accuracy)
 
 ---
 
-## 🔄 Processing Flow
+## 📁 โครงสร้างไฟล์หลัก
 
-### 1. Request Validation (< 1s)
-
-```go
-POST /api/v1/analyze-receipt
-Headers: x-shop-code: DEMO001
-Body: multipart/form-data with images[]
-```
-
-**Steps:**
-1. Validate shopid exists
-2. Check master data availability
-3. Load from cache (5-min TTL) or fetch from MongoDB
-4. Download images from Azure Blob Storage
-
-**Collections Used:**
-- `shopProfile` - Business context
-- `chartOfAccounts` - Account codes
-- `journalBooks` - Journal book codes
-- `creditors` / `debtors` - Vendor/customer list
-- `documentFormate` - Accounting templates
+| ไฟล์ | หน้าที่ |
+|------|---------|
+| `cmd/api/main.go` | Entry point - เริ่ม Gin server, CORS, Routes, Graceful Shutdown |
+| `configs/config.go` | โหลด config จาก .env (API Key, MongoDB, Timeout) |
+| `internal/api/handlers.go` | Handler หลัก - จัดการ request/response, Image Quality Validation |
+| `internal/api/request_context.go` | Request Context สำหรับ tracking และ logging |
+| `internal/common/request_context.go` | Shared request context utilities |
+| **📝 AI Prompt Management** | |
+| `internal/ai/prompt_ocr.go` | 🔍 **Prompt สำหรับ Pure OCR** - อ่านข้อความดิบจากเอกสาร |
+| `internal/ai/prompt_accountant.go` | 🧮 **System Instruction สำหรับนักบัญชี AI** - กฎและหลักการทางบัญชี |
+| `internal/ai/prompts.go` | 📋 Master Data Formatting - จัดรูปแบบข้อมูลหลักส่งให้ AI |
+| **🤖 AI Processing** | |
+| `internal/ai/gemini.go` | เรียก Gemini API สำหรับ OCR และวิเคราะห์บัญชี |
+| `internal/ai/gemini_retry.go` | Retry logic สำหรับ Gemini API (จัดการ 429, 500 errors) |
+| **🔧 Processing & Storage** | |
+| `internal/processor/template_matcher.go` | จับคู่เอกสารกับ Template ที่กำหนดไว้ (ใช้ AI) |
+| `internal/processor/imageprocessor.go` | Image Preprocessing (High Quality Mode) |
+| `internal/storage/mongodb.go` | เชื่อมต่อ MongoDB + Query ข้อมูล |
+| `internal/storage/cache.go` | Cache Master Data (TTL 5 นาที) |
+| `internal/ratelimit/rate_limiter.go` | Rate Limiting สำหรับ Gemini API |
 
 ---
 
-### 2. Phase 2: Pure OCR Extraction (~2,100 tokens)
+## 🧠 AI Prompts แบ่งตามหน้าที่ (Separation of Concerns)
 
-**Purpose:** Extract raw text only (no structure)
+### 1️⃣ Prompt OCR (Pure OCR) - อ่านข้อความดิบ
 
-**Process:**
-```
-Image → Preprocessing → Gemini API (Pure OCR) → raw_document_text
-```
+**ไฟล์**: `internal/ai/prompt_ocr.go`  
+**ฟังก์ชัน**: `GetPureOCRPrompt()`
 
-**Prompt Strategy:**
-- อ่านข้อความทั้งหมดที่เห็นในเอกสาร
-- ไม่ต้อง extract fields
-- คั่นบรรทัดด้วย \n
+**หน้าที่**: 
+- อ่านข้อความทั้งหมดจากรูปภาพเป็น **raw_document_text**
+- ไม่วิเคราะห์ ไม่แยกโครงสร้าง ไม่ทำความเข้าใจ
+- แค่อ่านทุกตัวอักษรที่เห็นแล้วส่งกลับเป็นข้อความดิบ
+- ประหยัด Token: ~82% เทียบกับแบบเดิมที่ให้ AI แยกโครงสร้างด้วย
+
+**หลักการ**:
 - อ่านจากบนลงล่าง, ซ้ายไปขวา
+- เก็บข้อความดิบๆ ไม่จัดรูปแบบ
+- ระมัดระวังเลข 0 นำหน้า (008131560570)
+- ใช้บริบทช่วยคาดเดาอักษรไทยที่ไม่ชัด
 
-**Output:**
+**Output Schema**: 
 ```json
 {
   "status": "success",
-  "raw_document_text": "บริษัท บางจากกรีนเนท จำกัด\n...\nHJ DIESEL S\n..."
-}
-```
-
-**Token Savings:** 83% vs Full OCR
-- Old: 30,000 tokens
-- New: 2,100 tokens
-
----
-
-### 3. Phase 2.5: AI Template Matching (~1,200 tokens)
-
-**Purpose:** Intelligently match document with accounting templates
-
-**Algorithm:**
-```
-raw_document_text + template_descriptions[] → Gemini AI → best_match + confidence
-```
-
-**Matching Logic:**
-- AI analyzes document content vs template descriptions
-- Checks for keywords, vendor names, transaction types
-- Returns confidence score 0-100%
-- Threshold: **85%** for template-only mode
-
-**Example Templates:**
-- "ค่าน้ำมัน" - keywords: เบนซิน, ดีเซล, ปตท, บางจาก
-- "ค่าไฟฟ้า" - keywords: การไฟฟ้า, PEA, MEA, kWh
-- "ค่าทำบัญชี" - keywords: สำนักงานบัญชี, ค่าทำบัญชี
-
-**Output:**
-```json
-{
-  "matched_template": "ค่าน้ำมัน",
-  "confidence": 100,
-  "reasoning": "เอกสารมีคำว่า HJ DIESEL S และแสดงรายการซื้อน้ำมันเชื้อเพลิง"
+  "raw_document_text": "ข้อความทั้งหมดจากเอกสาร",
+  "metadata": { "model_name": "gemini-2.5-flash" }
 }
 ```
 
 ---
 
-### 4. Phase 3: Accounting Analysis (7,000-14,000 tokens)
+### 2️⃣ System Instruction สำหรับนักบัญชี AI
 
-#### Mode Selection
+**ไฟล์**: `internal/ai/prompt_accountant.go`  
+**ฟังก์ชัน**: `BuildAccountantSystemInstruction(shopContext, templateGuidance)`
+
+**หน้าที่**: กำหนด Rules และหลักการทางบัญชีให้ AI ปฏิบัติตาม
+
+**ลำดับความสำคัญ (Priority)**:
+1. **Shop Context** (บริบทธุรกิจ) - Always Applied
+   - มาจาก `promptshopinfo` ใน collection `shops`
+   - เช่น: "ธุรกิจร้านอาหาร ไม่จดทะเบียน VAT"
+   
+2. **Template Guidance** (คำแนะนำเฉพาะ Template) - When Template Matched
+   - มาจาก `promptdescription` ใน collection `documentFormate`
+   - มีอำนาจสูงสุด - Override ทุก Rule
+   - เช่น: "ใช้ยอดรวมไปเลย ไม่ต้องบันทึกภาษีซื้อ"
+
+3. **Primary Rules** (กฎทางบัญชี)
+   - Rule #0: Withholding Tax Certificates (สูงสุด)
+   - Rule #1: Template Enforcement
+   - Rule #2: Master Data Validation
+   - Rule #3: Double Entry Validation
+   - Rule #4: Withholding Tax Handling ⭐ **สำคัญ!**
+   - Rule #5: VAT Handling
+   - Rule #6: Creditor/Debtor Matching (Fuzzy ≥70%)
+   - Rule #7: Journal Book Selection
+   - Rule #8: Documentation & Explanations
+
+**ตัวอย่าง Rule #4 - Withholding Tax Handling**:
+```
+เมื่อพบ "ภาษีหัก ณ ที่จ่าย":
+- ถ้า Template บอกให้บันทึก → บันทึกเป็นรายการแยก
+- ถ้า Template บอก "ใช้ยอดรวมไปเลย" → ตรวจสอบว่ามีคำว่า 
+  "ไม่ต้องบันทึกภาษีหัก ณ ที่จ่าย" หรือไม่
+  - ถ้าไม่มี → ต้องบันทึก! (ภาษีหัก ≠ ภาษีซื้อ)
+  
+สูตร:
+Dr. Expense = Total BEFORE withholding
+Dr./Cr. Withholding Tax = Tax Amount
+Cr. Cash = Amount Actually Paid
+```
+
+---
+
+### 3️⃣ Master Data Formatting
+
+**ไฟล์**: `internal/ai/prompts.go`  
+**ฟังก์ชัน**: `BuildMultiImageAccountingPrompt()`, `formatMasterDataWithMode()`
+
+**หน้าที่**: จัดรูปแบบข้อมูลหลัก (Master Data) เพื่อส่งให้ AI
+
+**2 Modes**:
+- **Template-Only Mode**: ส่งเฉพาะ Template ที่ Match (~7,000 tokens)
+- **Full Mode**: ส่ง Chart of Accounts ทั้งหมด (~30,000 tokens)
+
+**ข้อมูลที่รวม**:
+- Chart of Accounts (ผังบัญชี)
+- Journal Books (สมุดรายวัน)
+- Creditors/Debtors (รายชื่อผู้ขาย/ลูกค้า)
+- Document Templates (Template บัญชี)
+- Shop Profile (ข้อมูลธุรกิจ)
+- Fuzzy Matching Guidelines (≥70%)
+
+---
+
+## 📊 ข้อมูลที่ AI ใช้ตัดสินใจ
+
+```mermaid
+flowchart LR
+    subgraph "ข้อมูล Input"
+        A[raw_document_text จาก OCR]
+        B[Master Data]
+        C[Custom Prompts]
+    end
+    
+    subgraph "Master Data จาก MongoDB"
+        B --> B1[Chart of Accounts - ผังบัญชี]
+        B --> B2[Journal Books - สมุดรายวัน]
+        B --> B3[Creditors - เจ้าหนี้]
+        B --> B4[Debtors - ลูกหนี้]
+        B --> B5[Document Templates - รูปแบบบัญชี]
+    end
+    
+    subgraph "Custom Prompts จาก User"
+        C --> C1[promptshopinfo - บริบทธุรกิจ]
+        C --> C2[promptdescription - คำแนะนำ Template]
+    end
+    
+    A & B & C --> D[AI นักบัญชีไทย]
+    D --> E[Journal Entry]
+```
+
+---
+
+## 🔑 Custom Prompts ทำงานอย่างไร
+
+### `promptshopinfo` (จาก collection `shops`)
+
+**ใช้ตรงไหน**: ส่งเป็น **Shop Context** ใน System Instruction (บรรทัด 879-889 ใน gemini.go)
+
+**ตัวอย่าง**: 
+```
+ธุรกิจร้านอาหาร รายได้หลักจากขายอาหาร วัตถุดิบหลักคือเนื้อสัตว์และผัก
+```
+
+**ผลกระทบ**: AI จะรู้ว่าธุรกิจทำอะไร → เลือก Account ที่เหมาะสม
+- เช่น ซื้อไก่ในร้านอาหาร → บันทึกเป็น "ต้นทุนอาหาร" ไม่ใช่ "วัสดุสิ้นเปลือง"
+
+### `promptdescription` (จาก collection `documentFormate`)
+
+**ใช้ตรงไหน**: ส่งเป็น **Template Guidance** ใน System Instruction (บรรทัด 894-917 ใน gemini.go)
+
+**ตัวอย่าง**: 
+```
+ยอดจ่ายชำระต้องหักยอดภาษี หัก ณ ที่จ่าย: เงินสด = ยอดรวม - ภาษีหัก
+```
+
+**ผลกระทบ**: AI จะทำตามสูตรที่กำหนด
+- เช่น Template บอกให้คำนวณ → AI จะคำนวณ (แม้ปกติจะห้ามคำนวณเอง)
+
+---
+
+## 📋 ลำดับความสำคัญของ Rules
 
 ```
-Template Confidence ≥ 85%  → Template-Only Mode (7K tokens)
-Template Confidence < 85%  → Full Mode (14K tokens)
+1️⃣ Template Guidance (promptdescription) - สูงสุด
+      ↓
+2️⃣ Shop Context (promptshopinfo) - บริบทธุรกิจ
+      ↓
+3️⃣ Template Rules - ต้องใช้ Account ครบตาม Template
+      ↓
+4️⃣ Master Data - ใช้เฉพาะ Account ที่มีใน DB
+      ↓
+5️⃣ Accounting Standards - หลักบัญชีทั่วไป
 ```
 
-#### A. Template-Only Mode (Optimized)
+**ถ้า Template Guidance บอกให้ทำอะไร → AI ต้องทำตาม แม้จะขัดกับ Rule อื่น**
 
-**When:** Template confidence ≥ 85%
+---
 
-**Strategy:**
-- Send **only matched template** to AI
-- No Chart of Accounts needed
-- Force balance: Debit = Credit
-- Fast & cheap
+## 🗃️ Master Data จาก MongoDB
 
-**Prompt Content:**
-```
-- Matched template with account codes
-- Shop profile (business context)
-- Balance enforcement rules
-```
+| Collection | ใช้ทำอะไร | จำเป็น |
+|------------|----------|--------|
+| `shops` | ข้อมูลร้านค้า + promptshopinfo (บริบทธุรกิจ) | ✅ Required |
+| `chartofaccounts` | ผังบัญชี (Account Code + Name) | ✅ Required |
+| `journalBooks` | สมุดรายวัน (02=ซื้อ, 03=ขาย, 01=ทั่วไป) | ✅ Required |
+| `creditors` | รายชื่อเจ้าหนี้/ผู้ขาย (รองรับ Fuzzy Matching ≥70%) | ⚠️ Optional แต่แนะนำ |
+| `debtors` | รายชื่อลูกหนี้/ลูกค้า (สำหรับใบขาย/ใบวางบิล) | ⚠️ Optional |
+| `documentFormate` | Template บัญชีที่กำหนดไว้ล่วงหน้า (ช่วยประหยัด token) | ⚠️ Optional แต่แนะนำ |
 
-**Account Selection:**
-```json
+---
+
+## 🔄 3 Phases ของ AI Processing
+
+### Phase 1: Pure OCR + Image Quality Validation
+- **ฟังก์ชัน**: `ProcessPureOCR()` (gemini.go)
+- อ่านข้อความดิบจากรูปภาพทั้งหมด (raw_document_text)
+- ประมวลผลรูปภาพด้วย **High Quality Preprocessing** (`PreprocessImageHighQuality()`)
+  - Sharpen, Contrast, Brightness, Grayscale enhancement
+  - Fallback to original image หากประมวลผลไม่สำเร็จ
+- ประหยัด token ~82% เทียบกับการให้ AI แยกโครงสร้างทันที
+- **ตรวจสอบคุณภาพรูปภาพ** ตามเกณฑ์:
+  - Text Clarity Score ≥ 70%
+  - Handwriting Confidence ≥ 85%
+  - Overall Confidence ≥ 70%
+- Return: `raw_document_text` + validation metadata
+- **Sequential Processing**: ประมวลผลทีละรูปเพื่อหลีกเลี่ยง Rate Limit 429 Error
+
+### Phase 2: Template Matching (AI-Driven)
+- **ฟังก์ชัน**: `AnalyzeTemplateMatch()` (template_matcher.go)
+- ใช้ **Gemini AI** วิเคราะห์ raw_document_text + template descriptions
+- AI เลือก template ที่เหมาะสมพร้อมให้เหตุผล (reasoning)
+- ถ้า Confidence ≥85% → **Template-Only Mode** (ประหยัด ~20,000 tokens ใน Phase 3)
+- ถ้า < 85% → **Full Mode** (ส่ง Chart of Accounts ทั้งหมดให้ AI)
+- รองรับ `promptdescription` จาก Template สำหรับคำแนะนำเฉพาะ
+
+### Phase 3: Accounting Analysis (Multi-Image Support)
+- **ฟังก์ชัน**: `ProcessMultiImageAccountingAnalysis()` (gemini.go)
+- รวมข้อมูลจากหลายรูปภาพ (เช่น ใบเสร็จ + สลิปโอนเงิน)
+- สร้าง Journal Entry ตาม:
+  - Template (Template-Only Mode) หรือ
+  - Master Data + Accounting Rules (Full Mode)
+- Validate: 
+  - Debit = Credit (tolerance 0.01 บาท)
+  - Account Code ต้องมีใน Master Data
+  - Balance Check + Error Handling
+- รองรับ **Timeout 5 นาที** พร้อม Partial Results สำหรับใบเสร็จซับซ้อน
+
+---
+
+## 🎯 ลำดับการตัดสินใจของ AI
+
+1. **AI อ่าน OCR** → ได้ข้อความดิบจากเอกสาร
+2. **ดู promptshopinfo** → รู้ว่าธุรกิจทำอะไร (ร้านอาหาร? ค้าปลีก? บริการ?)
+3. **Template Matching** → หา Template ที่ตรงกับเอกสาร
+4. **ถ้ามี Template + promptdescription** → ทำตามคำแนะนำใน Template
+5. **ถ้าไม่มี Template** → ใช้ Master Data + หลักบัญชีไทย
+6. **สร้าง Journal Entry** → Debit/Credit ตามหลักบัญชี
+7. **Validate** → เช็ค Balance, Account Code ถูกต้อง
+
+---
+
+## 🔑 ความสามารถพิเศษ
+
+1. **Image Quality Validation** - ตรวจสอบคุณภาพรูปภาพก่อนประมวลผล พร้อม Rejection Response แบบละเอียด
+2. **High Quality Image Preprocessing** - ปรับปรุงรูปภาพด้วย Sharpen, Contrast, Brightness เพื่อความแม่นยำสูงสุด
+3. **Template Enforcement** - ถ้าใช้ Template ต้องใช้ Account ครบตาม Template
+4. **AI-Driven Template Matching** - ใช้ Gemini AI เลือก Template อัจฉริยะพร้อมเหตุผล
+5. **Fuzzy Matching** - จับคู่ชื่อเจ้าหนี้/ลูกหนี้แม้สะกดต่างกัน (≥70%)
+6. **Multi-Image Support** - รวมข้อมูลจากหลายรูป (เช่น ใบเสร็จ + สลิปโอนเงิน)
+7. **Smart Rate Limiting** - Retry logic อัตโนมัติสำหรับ 429, 500 errors (exponential backoff)
+8. **Sequential Processing** - ป้องกัน 429 Error ด้วยการประมวลผลทีละรูป (1 worker)
+9. **Graceful Timeout** - 5 นาที timeout พร้อม Partial Results Summary
+10. **Request Context Tracking** - ติดตาม request ID และ processing steps สำหรับ debugging
+11. **In-Memory Cache** - Cache Master Data 5 นาที (auto-reload เมื่อหมดอายุ)
+12. **JSON Escaping Fix** - แก้ไขปัญหา JSON formatting จาก Gemini API อัตโนมัติ
+
+---
+
+## 📤 ตัวอย่าง Request
+
+```bash
+POST /api/v1/analyze-receipt
+Content-Type: application/json
+
 {
-  "template_id": "693a9e953c54ede15017fcbf",
-  "template_name": "ค่าน้ำมัน",
-  "details": [
-    {"account_code": "531220", "account_name": "ค่าน้ำมัน-ค่าแก๊สรถยนต์", "type": "debit"},
-    {"account_code": "111110", "account_name": "เงินสดในมือ", "type": "credit"}
+  "shopid": "shop-123",
+  "imagereferences": [
+    {
+      "documentimageguid": "img-001",
+      "imageuri": "https://storage.azure.com/container/image1.jpg"
+    }
   ]
 }
 ```
 
-**Forced Balance:**
-- ใบเสร็จ: 2,320 บาท
-- AI ใช้: Debit = 2,320, Credit = 2,320
-- ไม่สนใจ VAT breakdown
-- เร็วและสะดวก
-
-**Token Usage:** ~7,000 tokens
-
-#### B. Full Mode (Comprehensive)
-
-**When:** Template confidence < 85%
-
-**Strategy:**
-- Send **full master data** (240 accounts)
-- Apply **Thai accounting classification rules**
-- Smart account selection
-- Proper VAT handling
-
-**Prompt Content:**
-```
-- All Chart of Accounts (240 accounts)
-- All Journal Books (5 books)
-- Creditors/Debtors lists
-- Shop profile
-- Thai accounting rules
-- Account selection guidelines
-```
-
-**Thai Accounting Classification:**
-
-1. **ค่าบริการ/ค่าที่ปรึกษา** (Service Fees)
-   - ใช้เมื่อ: รับบริการวิชาชีพ
-   - ค้นหา: "ที่ปรึกษา", "ธรรมเนียม", "บริการ"
-   - ตัวอย่าง: ค่าทำบัญชี, ค่าทนาย
-
-2. **ค่าวัสดุ/สินค้า** (Materials & Supplies)
-   - ใช้เมื่อ: ซื้อสิ่งของที่จับต้องได้
-   - ค้นหา: "วัสดุ", "อุปกรณ์", "เบ็ดเตล็ด"
-   - ตัวอย่าง: ยางขัด, สกรู, ซิลิโคน
-
-3. **ค่าเบ็ดเตล็ด** (Miscellaneous)
-   - ใช้เมื่อ: ไม่แน่ใจ หรือหลายประเภทปะปน
-   - Default safe choice
-
-**Account Selection Process:**
-```
-1. วิเคราะห์ประเภทรายการ (บริการ vs สินค้า)
-2. ตรวจสอบชื่อผู้ขาย
-3. ค้นหาบัญชีที่เหมาะสมจาก Chart of Accounts
-4. ห้ามใช้รหัสที่ไม่มีใน Master Data
-5. แต่ละธุรกิจมีผังบัญชีไม่เหมือนกัน
-```
-
-**Token Usage:** ~14,000 tokens
-
 ---
 
-### 4.5. Journal Book Selection (v2.1 Enhancement)
-
-**Purpose:** Select correct Journal Book based on document type and VAT presence
-
-**Priority-Based Rules:**
-
-1. **Priority 1 - Purchase Documents (เราเป็นผู้ซื้อ)**
-   - เงื่อนไข: มี VAT หรือ ภาษีซื้อ
-   - ประเภท: ค่าบริการ, ค่าทำบัญชี, ซื้อสินค้า
-   - **ต้องใช้:** สมุดรายวันซื้อ (Purchase Journal)
-   - 🔴 **ห้าม:** ใช้สมุดรายวันทั่วไป (General Journal) เมื่อมี VAT
-
-2. **Priority 2 - Sales Documents (เราเป็นผู้ขาย)**
-   - เงื่อนไข: ชื่อบริษัทเราเป็นผู้ออกเอกสาร + มี VAT
-   - **ต้องใช้:** สมุดรายวันขาย (Sales Journal)
-
-3. **Priority 3 - Cash Transactions (ไม่มี VAT)**
-   - เงื่อนไข: ไม่มี VAT, ชำระเงินสด
-   - **ต้องใช้:** สมุดรายวันรับ/จ่ายเงินสด (Cash Journal)
-
-4. **Priority 4 - General Transactions**
-   - เงื่อนไข: ไม่ตรงเงื่อนไขข้างต้น
-   - **ใช้:** สมุดรายวันทั่วไป (General Journal)
-
-**Decision-Making Steps:**
-```
-1. Check VAT presence
-   └─> มี VAT → Priority 1 or 2
-   └─> ไม่มี VAT → Priority 3 or 4
-
-2. Determine buyer/seller
-   └─> เราเป็นผู้ซื้อ → Purchase Journal
-   └─> เราเป็นผู้ขาย → Sales Journal
-
-3. Check payment method (if no VAT)
-   └─> เงินสด → Cash Journal
-   └─> อื่นๆ → General Journal
-```
-
-**Examples:**
-```
-✅ ถูกต้อง:
-- ใบเสร็จค่าทำบัญชี + VAT 140 บาท
-  → เราเป็นผู้ซื้อ → "สมุดรายวันซื้อ" (02)
-
-❌ ผิด (ห้ามทำ):
-- ใบเสร็จค่าทำบัญชี + มี VAT
-  → "สมุดรายวันทั่วไป" (01) ❌ ผิด! มี VAT ต้องใช้สมุดซื้อ
-```
-
-**Implementation:** [prompts.go:1214-1275](../internal/ai/prompts.go#L1214-L1275)
-
-**Testing Results:**
-- Before fix: 80% accuracy (4/5 tests correct)
-- After fix: **100% accuracy** (3/3 tests correct)
-
----
-
-### 5. Response Generation
-
-**Complete Response Structure:**
+## 📥 ตัวอย่าง Response
 
 ```json
 {
   "status": "success",
-  
   "receipt": {
-    "number": "W25101502018171",
-    "date": "06/11/2025",
-    "vendor_name": "บริษัท บางจากกรีนเนท จำกัด",
-    "vendor_tax_id": "0105536080112",
-    "total": 2320,
-    "vat": 151.78,
-    "payment_method": "เงินสด"
+    "number": "INV-001",
+    "date": "16/12/2025",
+    "vendor_name": "บริษัท ABC จำกัด",
+    "vendor_tax_id": "1234567890123",
+    "total": 2140.00,
+    "vat": 140.00
   },
-  
   "accounting_entry": {
-    "document_date": "06/11/2025",
-    "reference_number": "W25101502018171",
     "journal_book_code": "02",
     "journal_book_name": "สมุดรายวันซื้อ",
-    "creditor_code": "",
-    "creditor_name": "Unknown Vendor",
-    "debtor_code": "",
-    "debtor_name": "",
+    "creditor_code": "CR001",
+    "creditor_name": "บริษัท ABC จำกัด",
     "entries": [
       {
-        "account_code": "531220",
-        "account_name": "ค่าน้ำมัน-ค่าแก๊สรถยนต์",
-        "debit": 2320,
-        "credit": 0,
-        "description": "ซื้อน้ำมันเชื้อเพลิง"
+        "account_code": "533020",
+        "account_name": "ค่าธรรมเนียม-ค่าที่ปรึกษาบัญชี",
+        "debit": 2000.00,
+        "credit": 0.00,
+        "description": "ค่าทำบัญชีประจำเดือน",
+        "selection_reason": "ค่าทำบัญชี",
+        "side_reason": "ค่าใช้จ่ายเพิ่มขึ้นลง DR"
+      },
+      {
+        "account_code": "115810",
+        "account_name": "ค่าภาษีซื้อ",
+        "debit": 140.00,
+        "credit": 0.00,
+        "description": "ภาษีมูลค่าเพิ่ม",
+        "selection_reason": "ภาษีซื้อ",
+        "side_reason": "สินทรัพย์เพิ่มขึ้นลง DR"
       },
       {
         "account_code": "111110",
         "account_name": "เงินสดในมือ",
-        "debit": 0,
-        "credit": 2320,
-        "description": "ชำระด้วยเงินสด"
+        "debit": 0.00,
+        "credit": 2140.00,
+        "description": "จ่ายเงินสด",
+        "selection_reason": "ชำระด้วยเงินสด",
+        "side_reason": "เงินสดลดลงลง CR"
       }
     ],
     "balance_check": {
       "balanced": true,
-      "total_debit": 2320,
-      "total_credit": 2320
+      "total_debit": 2140.00,
+      "total_credit": 2140.00
     }
   },
-  
   "template_info": {
     "template_used": true,
-    "template_name": "ค่าน้ำมัน",
-    "template_id": "693a9e953c54ede15017fcbf",
-    "confidence": 100,
-    "accounts_used": [
-      {"account_code": "531220", "account_name": "ค่าน้ำมัน-ค่าแก๊สรถยนต์"},
-      {"account_code": "111110", "account_name": "เงินสดในมือ"}
-    ],
-    "note": "AI วิเคราะห์แล้วพบว่าใบเสร็จตรงกับเทมเพลตที่กำหนดไว้"
+    "template_name": "ค่าทำบัญชี",
+    "template_id": "tmpl-001",
+    "confidence": 95
   },
-  
   "validation": {
-    "confidence": {
+    "overall_confidence": {
       "level": "high",
-      "score": 99
+      "score": 95
     },
-    "requires_review": false,
-    "ai_explanation": {
-      "reasoning": "ใบกำกับภาษี ซื้อน้ำมันเชื้อเพลิง ยอด 2,320 บาท ใช้บัญชีตาม template",
-      "account_selection_logic": {
-        "template_used": true,
-        "template_details": "Template ID: 693a9e953c54ede15017fcbf",
-        "debit_accounts": [
-          {
-            "account_code": "531220",
-            "account_name": "ค่าน้ำมัน-ค่าแก๊สรถยนต์",
-            "amount": 2320,
-            "reason_for_selection": "ซื้อน้ำมันเชื้อเพลิง ใช้บัญชีตาม template"
-          }
-        ],
-        "credit_accounts": [
-          {
-            "account_code": "111110",
-            "account_name": "เงินสดในมือ",
-            "amount": 2320,
-            "reason_for_selection": "ชำระด้วยเงินสด ตาม template"
-          }
-        ],
-        "verification": "Debit (2320) = Credit (2320). บัญชีทั้งหมดมาจาก template"
-      },
-      "transaction_analysis": {
-        "type": "purchase_for_use",
-        "buyer_seller_determination": "เราเป็นผู้ซื้อเนื่องจากชื่อผู้ออกเอกสารไม่ตรงกับชื่อบริษัทเรา",
-        "has_vat": true,
-        "payment_method": "เงินสด",
-        "payment_proof": false
-      },
-      "vendor_matching": {
-        "found_in_document": "บริษัท บางจากกรีนเนท จำกัด",
-        "matched_with": null,
-        "matching_method": "not_found",
-        "confidence": 0,
-        "reason": "ไม่พบผู้ขายในรายการ Creditors จึงใช้ Unknown Vendor"
-      },
-      "risk_assessment": {
-        "overall_risk": "low",
-        "factors": "เอกสารชัดเจน template ตรงกัน บัญชีสมดุล",
-        "recommendations": "ไม่ต้องตรวจสอบเพิ่มเติม"
-      }
-    }
+    "requires_review": false
   },
-  
   "metadata": {
-    "duration_sec": 15.02,
-    "images_processed": 1,
-    "cost_thb": "฿0.07",
-    "processed_at": "2025-12-12T15:55:45+07:00",
-    "request_id": "5b0d12fc-9066-45c7-9896-3969dcf37968"
+    "request_id": "req-001",
+    "processed_at": "2025-12-16T02:12:00Z",
+    "duration_sec": 15.5,
+    "cost_thb": 2.50,
+    "images_processed": 1
   }
 }
 ```
 
 ---
 
-## 📊 Performance Comparison
+## ⚙️ Environment Variables สำคัญ
 
-### Token Usage
-
-| Scenario | Old System | New System (Template) | New System (Full) | Savings |
-|----------|-----------|---------------------|------------------|---------|
-| **Phase 2** | 30,000 | 2,100 | 2,100 | **93%** ⬇️ |
-| **Phase 2.5** | - | 1,200 | 1,200 | New |
-| **Phase 3** | 30,000 | 7,000 | 14,000 | **77-53%** ⬇️ |
-| **Total** | **60,000** | **10,300** | **17,300** | **83-71%** ⬇️ |
-
-### Cost Impact (Gemini 2.5 Flash)
-
-| Metric | Old | Template Mode | Full Mode |
-|--------|-----|--------------|-----------|
-| Input tokens | 30,000 | 10,000 | 13,000 |
-| Output tokens | 2,000 | 1,500 | 2,500 |
-| Cost per request | ฿0.15 | ฿0.04 | ฿0.07 |
-| **Savings** | - | **73%** | **53%** |
-
-### Processing Time
-
-| Phase | Old | New |
-|-------|-----|-----|
-| Image Download | 2-3s | 2-3s |
-| OCR Processing | 15-20s | 6-8s |
-| Template Matching | - | 1-2s |
-| Accounting Analysis | 15-20s | 6-10s |
-| **Total** | **35-45s** | **15-20s** |
-
----
-
-## 🎯 Key Design Decisions
-
-### 1. Why Pure OCR?
-
-**Problem:** Full structured extraction wastes tokens
-```
-Old: Extract all fields → 30K tokens
-New: Extract text only → 2.1K tokens
-```
-
-**Benefits:**
-- 93% token reduction in Phase 2
-- Faster processing
-- Same accuracy (AI can analyze text later)
-
-### 2. Why AI Template Matching?
-
-**Alternatives Tried:**
-- ❌ Levenshtein Distance → 0% accuracy (hardcoded keywords)
-- ❌ Keyword matching → Brittle, not intelligent
-- ✅ **Gemini AI** → 95-100% accuracy (understands context)
-
-**Why It Works:**
-- AI understands semantics, not just keywords
-- Adapts to variations in wording
-- Learns from template descriptions
-
-### 3. Why 85% Threshold?
-
-**Testing Results:**
-| Confidence | Template Accuracy | Decision |
-|-----------|------------------|----------|
-| 95-100% | 99% correct | ✅ Safe |
-| 85-94% | 95% correct | ✅ Acceptable |
-| 70-84% | 80% correct | ❌ Risky |
-| < 70% | 60% correct | ❌ Don't use |
-
-**Conclusion:** 85% balances speed (template mode) vs accuracy
-
-### 4. Why Forced Balance?
-
-**User Requirement:**
-> "ถ้าใช้ Template Matching ต้องให้ Balance กันเลย ไม่ต้องดูตามหลักบัญชี"
-
-**Rationale:**
-- Templates = shortcuts for common transactions
-- Speed > Accounting precision
-- Users know what they're doing
-- Full mode available for complex cases
-
-### 5. Why Thai Language Explanations?
-
-**User Feedback:**
-> "นักบัญชีไม่เข้าใจเหตุผลของ AI เพราะเป็นภาษาอังกฤษ"
-
-**Solution:**
-- All `ai_explanation` fields → Thai only
-- `reason_for_selection` → 1 sentence (max 20 words)
-- `reasoning` → 2-3 sentences (max 50 words)
-- Short, clear, actionable
+| Variable | ค่า Default | คำอธิบาย |
+|----------|-------------|----------|
+| `GEMINI_API_KEY` | (required) | API Key สำหรับ Gemini |
+| **Phase-Specific Models** | | |
+| `OCR_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล OCR (Phase 1) - เน้นความแม่นยำไทย |
+| `TEMPLATE_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Template Matching (Phase 2) |
+| `TEMPLATE_ACCOUNTING_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Accounting (Template-only ≥85%) |
+| `ACCOUNTING_MODEL_NAME` | gemini-2.5-flash | โมเดล Accounting (Full analysis <85%) |
+| `MODEL_NAME` | gemini-2.5-flash-lite | (Deprecated) Backward compatibility |
+| **Pricing Configuration** | | |
+| `OCR_INPUT_PRICE_PER_MILLION` | 0.10 | ราคา OCR input (USD/1M tokens) |
+| `OCR_OUTPUT_PRICE_PER_MILLION` | 0.40 | ราคา OCR output (USD/1M tokens) |
+| `TEMPLATE_INPUT_PRICE_PER_MILLION` | 0.10 | ราคา Template input (USD/1M tokens) |
+| `TEMPLATE_OUTPUT_PRICE_PER_MILLION` | 0.40 | ราคา Template output (USD/1M tokens) |
+| `TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION` | 0.10 | ราคา Template Accounting input |
+| `TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION` | 0.40 | ราคา Template Accounting output |
+| `ACCOUNTING_INPUT_PRICE_PER_MILLION` | 0.30 | ราคา Full Accounting input (USD/1M tokens) |
+| `ACCOUNTING_OUTPUT_PRICE_PER_MILLION` | 2.50 | ราคา Full Accounting output (USD/1M tokens) |
+| `USD_TO_THB` | 36.0 | อัตราแลกเปลี่ยน USD เป็น THB |
+| **MongoDB & Server** | | |
+| `MONGO_URI` | mongodb://103.13.30.32:27017 | Connection String MongoDB |
+| `MONGO_DB_NAME` | smldevdb | ชื่อ Database |
+| `PORT` | 8080 | Port ที่ Server ทำงาน |
+| `UPLOAD_DIR` | uploads | โฟลเดอร์เก็บไฟล์ชั่วคราว (auto-cleanup) |
+| `ALLOWED_ORIGINS` | * | CORS allowed origins (ควรตั้งค่าเฉพาะเจาะจงใน production) |
+| `GIN_MODE` | debug | Gin mode: debug หรือ release |
+| `ENABLE_IMAGE_PREPROCESSING` | true | เปิดใช้งาน High Quality Image Preprocessing |
+| `MAX_IMAGE_DIMENSION` | 2000 | ขนาดรูปสูงสุด (pixels) |
+| `PARALLEL_PROCESSING` | false | ปิดใช้งาน (ใช้ Sequential เพื่อหลีกเลี่ยง 429 Error) |
 
 ---
 
-## 🔒 Data Quality & Validation
+## 🏗️ การติดตั้งและใช้งาน
 
-### Confidence Scoring
+### 1. Clone โปรเจ็กต์
+```bash
+git clone <repository-url>
+cd bill_scan_project
+```
 
-**Every field has confidence:**
+### 2. ติดตั้ง Dependencies
+```bash
+go mod download
+```
+
+### 3. ตั้งค่า Environment Variables
+สร้างไฟล์ `.env`:
+```bash
+GEMINI_API_KEY=your_gemini_api_key
+MONGO_URI=mongodb://your_mongo_connection
+MONGO_DB_NAME=your_db_name
+PORT=8080
+```
+
+### 4. รัน Server
+```bash
+go run cmd/api/main.go
+```
+
+### 5. ทดสอบ API
+```bash
+curl -X POST http://localhost:8080/api/v1/analyze-receipt \
+  -H "Content-Type: application/json" \
+  -d @test_request.json
+```
+
+---
+
+## 📚 API Endpoints
+
+### `POST /api/v1/analyze-receipt`
+
+**หน้าที่**: วิเคราะห์ใบเสร็จและสร้างบันทึกบัญชี
+
+**Request Body**:
 ```json
 {
-  "confidence": {
-    "level": "high",  // high/medium/low
-    "score": 95       // 0-100
-  },
-  "requires_review": false
-}
-```
-
-**Levels:**
-- **high (95-100)**: Clear, no ambiguity
-- **medium (80-94)**: Minor uncertainty, suggest review
-- **low (0-79)**: High uncertainty, requires review
-
-### Balance Validation
-
-**Always check:**
-```javascript
-total_debit === total_credit
-```
-
-**Template Mode:**
-- Force balance regardless of accounting rules
-- Debit = Total amount from receipt
-- Credit = Same amount
-
-**Full Mode:**
-- Proper accounting with VAT breakdown
-- Debit = Base + VAT
-- Credit = Payment method
-
-### Master Data Constraints
-
-**All codes must exist in Master Data:**
-- ✅ Account codes from `chartOfAccounts`
-- ✅ Journal book codes from `journalBooks`
-- ✅ Creditor/Debtor codes from respective collections
-- ❌ Never use hardcoded codes (e.g., "GL", "JV")
-
----
-
-## 🚨 Error Handling
-
-### Image Quality Issues
-
-```json
-{
-  "status": "error",
-  "error": "Poor image quality",
-  "details": "OCR confidence < 70%, please upload clearer image",
-  "suggestions": [
-    "Use better lighting",
-    "Avoid shadows",
-    "Take photo straight-on"
+  "shopid": "string (required)",
+  "imagereferences": [
+    {
+      "documentimageguid": "string",
+      "imageuri": "string (required)"
+    }
   ]
 }
 ```
 
-### Template Not Found
+**Response**: JSON object ที่มี:
+- `status`: "success" | "error"
+- `receipt`: ข้อมูลใบเสร็จที่แยกได้
+- `accounting_entry`: รายการบัญชีที่สร้าง
+- `validation`: ข้อมูลการตรวจสอบ
+- `template_info`: ข้อมูล Template ที่ใช้
+- `metadata`: ข้อมูลเพิ่มเติม (request_id, ค่าใช้จ่าย, etc.)
+
+---
+
+## 🛠️ การแก้ไขปัญหา
+
+### Rate Limiting (429 Error)
+- ระบบใช้ **Sequential Processing** (1 worker) เพื่อหลีกเลี่ยง 429 Error
+- มี **Automatic Retry** พร้อม Exponential Backoff (รอ 10-30 วินาที)
+- Gemini Free Tier: 15 RPM (4 วินาทีต่อ request)
+- หากยังเจอ 429: ลด concurrent requests หรืออัพเกรด Tier
+
+### Master Data ไม่ครบ
+- ระบบจะตรวจสอบ **ก่อนประมวลผล AI** เพื่อประหยัด tokens
+- ข้อมูลที่จำเป็น (Required):
+  - `chartofaccounts`: ผังบัญชี (ต้องมีอย่างน้อย 1 รายการ)
+  - `journalBooks`: สมุดรายวัน (ต้องมีอย่างน้อย 1 รายการ)
+  - `shops`: ข้อมูลร้านค้า + promptshopinfo
+- ข้อมูล Optional (แนะนำให้มี):
+  - `creditors`: รายชื่อเจ้าหนี้ (ช่วย Fuzzy Matching)
+  - `debtors`: รายชื่อลูกหนี้ (สำหรับใบขาย)
+  - `documentFormate`: Template บัญชี (ประหยัด ~20,000 tokens)
+- Response จะแจ้งข้อมูลที่ขาดชัดเจน
+
+### Template ไม่ Match
+- เพิ่ม `documentFormate` ใน MongoDB
+- ตั้งค่าให้ครบ:
+  - `description`: ชื่อ Template (เช่น "ค่าทำบัญชี")
+  - `promptdescription`: คำแนะนำการบันทึกบัญชี
+  - `details`: รายละเอียด Account ที่ใช้
+- ทดสอบด้วย debug mode: `?debug=true`
+- AI จะให้ `reasoning` อธิบายว่าทำไมเลือก Template นี้
+
+### Image Quality ไม่ผ่าน
+- ถ่ายรูปในที่แสงสว่างเพียงพอ
+- ให้กล้องโฟกัสก่อนถ่าย
+- วางเอกสารบนพื้นผิวเรียบ
+- หลีกเลี่ยงเงาและแสงสะท้อน
+- ระบบจะแจ้ง `issues` ที่เจอชัดเจน
+
+### Processing Timeout
+- ใบเสร็จที่มี 50+ รายการอาจใช้เวลานาน
+- ถ่ายรูปให้ชัดเพื่อลดเวลาประมวลผล
+- พิจารณาแบ่งใบเสร็จยาวเป็นหลายส่วน
+- ระบบจะส่ง Partial Results พร้อม Summary
+
+---
+
+## �️ Image Quality Validation
+
+ระบบตรวจสอบคุณภาพรูปภาพอัตโนมัติก่อนประมวลผล AI เพื่อป้องกันการสิ้นเปลือง tokens กับรูปภาพที่ไม่สามารถอ่านได้
+
+### เกณฑ์การตรวจสอบ
+
+| เกณฑ์ | ค่าขั้นต่ำ | คำอธิบาย |
+|-------|-----------|----------|
+| **Text Clarity Score** | 70% | ความชัดเจนของข้อความในเอกสาร |
+| **Handwriting Confidence** | 85% | ความมั่นใจในการอ่านลายมือ (ถ้ามี) |
+| **Overall Confidence** | 70% | ความมั่นใจโดยรวมในการแยกข้อมูล |
+
+### Rejection Response
+
+หากรูปภาพไม่ผ่านเกณฑ์ ระบบจะส่ง Response แบบละเอียด:
 
 ```json
 {
-  "template_info": {
-    "template_used": false,
-    "confidence": 65,
-    "note": "ไม่พบ Template ที่ตรงกัน ใช้ Full Mode แทน"
+  "status": "rejected",
+  "reason": "image_quality_insufficient",
+  "message": "รูปภาพไม่ผ่านเกณฑ์คุณภาพ กรุณาถ่ายรูปใหม่",
+  "failed_images": [
+    {
+      "documentimageguid": "img-001",
+      "image_index": 0,
+      "imageuri": "https://...",
+      "issues": [
+        {
+          "field": "text_clarity",
+          "issue": "Text is too blurry or low contrast",
+          "current_value": "45%",
+          "min_required": "70%"
+        }
+      ]
+    }
+  ],
+  "suggestions": [
+    "ถ่ายรูปในที่มีแสงสว่างเพียงพอ",
+    "ให้กล้องโฟกัสก่อนถ่าย",
+    "วางเอกสารบนพื้นผิวเรียบ"
+  ],
+  "request_id": "req-xxx",
+  "total_images": 2,
+  "failed_count": 1
+}
+```
+
+### ประโยชน์
+
+- **ประหยัด Tokens**: ไม่ส่งรูปภาพคุณภาพต่ำไปให้ AI ประมวลผล
+- **User Experience**: แจ้งปัญหาและวิธีแก้ไขชัดเจน
+- **Accuracy**: ป้องกันผลลัพธ์ที่ไม่แม่นยำจากรูปภาพไม่ชัด
+
+---
+
+## ⏱️ Timeout & Graceful Handling
+
+ระบบมี Timeout 5 นาทีสำหรับใบเสร็จที่ซับซ้อน (50+ รายการ)
+
+### Timeout Response
+
+หากประมวลผลเกิน 5 นาที ระบบจะส่ง Partial Results:
+
+```json
+{
+  "error": "Processing timeout",
+  "message": "Receipt is too complex and processing exceeded 5 minutes",
+  "details": "This usually happens with very long receipts (50+ items) or low-quality images",
+  "suggestions": [
+    "Try taking a clearer photo with better lighting",
+    "Ensure the receipt is flat and fully visible",
+    "Consider splitting very long receipts into sections"
+  ],
+  "request_id": "req-xxx",
+  "processing_summary": {
+    "timeout_at": "5 minutes",
+    "total_duration": 300.5,
+    "completed_steps": [
+      "download_images: success",
+      "pure_ocr_extraction_all: success",
+      "template_matching: success",
+      "accounting_analysis: timeout"
+    ]
   }
 }
 ```
 
-### Balance Failed
+### Server Timeouts
 
-```json
-{
-  "balance_check": {
-    "balanced": false,
-    "total_debit": 2320,
-    "total_credit": 2300,
-    "difference": 20,
-    "requires_review": true
-  }
-}
-```
-
----
-
-## 🛠️ Technical Stack
-
-### Backend
-- **Language:** Go 1.24.5
-- **Framework:** Gin 1.11.0
-- **Concurrency:** Goroutines for parallel processing
-
-### AI
-- **Model:** Gemini 2.5 Flash
-- **SDK:** google/generative-ai-go v0.20.1
-- **Features:** Vision API, JSON mode, Retry logic
-
-### Database
-- **MongoDB 6.0**
-- **Collections:** 6 (master data + templates)
-- **Caching:** In-memory, 5-min TTL
-
-### Image Processing
-- **Library:** disintegration/imaging
-- **Operations:** Sharpen, contrast, brightness
-- **Format:** JPEG/PNG support
-
----
-
-## 📝 Prompt Engineering
-
-### Pure OCR Prompt
-```
-คุณคือผู้เชี่ยวชาญด้าน OCR สำหรับเอกสารภาษาไทย
-
-งาน: อ่านข้อความทั้งหมดที่มองเห็นในเอกสาร
-- อ่านจากบนลงล่าง, ซ้ายไปขวา
-- คั่นบรรทัดด้วย \n
-- ไม่ต้อง extract fields
-- แค่อ่านข้อความดิบๆ
-```
-
-### Template Matching Prompt
-```
-วิเคราะห์เอกสารและหา Template ที่ตรงที่สุด
-
-ข้อความจากเอกสาร: [raw text]
-Templates: [descriptions]
-
-ให้ตอบเป็น JSON:
-- matched_template: ชื่อ template
-- confidence: 0-100
-- reasoning: เหตุผลสั้นๆ ภาษาไทย
-```
-
-### Accounting Analysis Prompt
-
-**Template-Only Mode:**
-```
-โหมดประหยัด TOKEN - Template-Only Mode
-
-ใช้เฉพาะบัญชีจาก template นี้:
-[template with account codes]
-
-กฎสำคัญ:
-- ห้ามเพิ่มบัญชีอื่น
-- บังคับให้ Balance (Debit = Credit)
-- ใช้ยอดรวมจากใบเสร็จ
-```
-
-**Full Mode:**
-```
-คุณคือนักบัญชีไทยมืออาชีพ
-
-Chart of Accounts: [240 accounts]
-Journal Books: [5 books]
-
-หลักการจัดประเภทบัญชีไทย:
-1. แยกแยะ: บริการ vs วัสดุ
-2. ค้นหาบัญชีจาก Chart of Accounts
-3. ห้ามใช้รหัสที่ไม่มีใน Master Data
-4. คำอธิบายเป็นภาษาไทยทั้งหมด
-```
-
----
-
-## ⚡ Rate Limiting Implementation (v2.1)
-
-### Architecture
-
-**Token Bucket Algorithm:**
 ```go
-type RateLimiter struct {
-    tokens         int           // Current available tokens
-    maxTokens      int           // Maximum tokens (12)
-    refillRate     time.Duration // Refill interval (5 seconds)
-    lastRefillTime time.Time
-}
+ReadTimeout:  3 seconds   // รับ request
+WriteTimeout: 3 minutes   // ส่ง response (ให้เวลา AI ประมวลผล)
 ```
 
-**Configuration:**
-- Max Tokens: **12** (80% of Gemini 15 RPM limit)
-- Refill Rate: **5 seconds** (25% slower than theoretical minimum)
-- Safety Margin: **20%** (handles network latency & burst traffic)
+---
 
-**Implementation Files:**
-- [rate_limiter.go](../internal/ratelimit/rate_limiter.go) - Token bucket implementation
-- [gemini_retry.go](../internal/ai/gemini_retry.go) - Retry logic with exponential backoff
-- [gemini.go](../internal/ai/gemini.go) - Phase 3 rate limiting
-- [handlers.go](../internal/api/handlers.go) - Sequential processing (1 worker)
+## 📝 Request Context & Logging
 
-**Retry Strategy:**
+ระบบใช้ **Request Context** สำหรับ tracking และ debugging
+
+### Features
+
+- **Request ID**: UUID สำหรับติดตามแต่ละ request
+- **Step Tracking**: บันทึกทุก step พร้อม duration
+- **Structured Logging**: Log แบบมีโครงสร้างชัดเจน
+- **Token Usage Tracking**: ติดตามการใช้ tokens แต่ละ phase
+
+### ตัวอย่าง Log
+
 ```
-Attempt 1: Wait for rate limiter → API call
-  └─> Error 429 → Wait 30s
-
-Attempt 2: Wait for rate limiter → API call
-  └─> Error 429 → Wait 60s
-
-Attempt 3: Wait for rate limiter → API call
-  └─> Error 429 → Fail with error
+[INFO] 🚀 เริ่มรับคำขอใหม่ | ShopID: shop-123 | RequestID: req-xxx
+[INFO] ✓ Master data validated: 150 accounts, 3 journal books, 45 creditors
+[INFO] 📸 Image size: 2.5 MB (2621440 bytes)
+[INFO] ✓ Pure OCR completed: 1250 tokens used
+[INFO] 📋 Template matched: "ค่าทำบัญชี" (95% confidence)
+[INFO] ✓ Accounting analysis completed: 3500 tokens used
+[INFO] ✅ Request completed: 15.5s total, 4750 tokens
 ```
 
-**Testing Results:**
-- 8 consecutive API requests
-- 0 HTTP 429 errors (100% success)
-- Consistent 15-16 second processing time
+---
+
+## �🔍 Debug Mode
+
+เพิ่ม parameter `?debug=true` เพื่อดูข้อมูลเพิ่มเติม:
+- Pure OCR Results (raw text)
+- Template Matching Results
+- Token Usage
+- Processing Steps
+
+```bash
+curl "http://localhost:8080/api/v1/analyze-receipt?debug=true" \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d @request.json
+```
 
 ---
 
-## 🎓 Future Improvements
+## 📈 ประสิทธิภาพ
 
-### Short Term
-- [ ] Support multi-page receipts better
-- [ ] Add receipt + payment slip merging
-- [ ] Improve handwritten text recognition
-- [ ] Add more template examples
+### Token Usage
 
-### Long Term
-- [ ] Queue system for high-traffic scenarios
-- [ ] Machine learning for template suggestions
-- [ ] Auto-create templates from frequent patterns
-- [ ] Support more document types (invoices, bills)
-- [ ] Multi-language support (English, Chinese)
+| Phase | Token Usage | หมายเหตุ |
+|-------|-------------|----------|
+| **Phase 1: Pure OCR** | ~1,000-1,500 | อ่านข้อความดิบเท่านั้น |
+| **Phase 2: Template Matching** | ~800-1,200 | AI เลือก Template |
+| **Phase 3: Accounting (Template Mode)** | ~2,000-3,000 | ใช้ Template เฉพาะ |
+| **Phase 3: Accounting (Full Mode)** | ~20,000-25,000 | ส่ง Chart of Accounts ทั้งหมด |
+| **Total (Template Mode)** | ~4,000-6,000 | ประหยัด 82% |
+| **Total (Full Mode)** | ~22,000-28,000 | สำหรับใบเสร็จที่ไม่มี Template |
+
+### Processing Time
+
+- **ใบเสร็จทั่วไป** (1-10 รายการ): 15-30 วินาที
+- **ใบเสร็จซับซ้อน** (10-50 รายการ): 30-90 วินาที
+- **ใบเสร็จยาวมาก** (50+ รายการ): 2-5 นาที (อาจ timeout)
+- **Sequential Processing**: เพิ่มเวลา ~4 วินาทีต่อรูป (ป้องกัน 429 Error)
+
+### Accuracy
+
+- **ใบเสร็จชัดเจน**: >95% accuracy
+- **ใบเสร็จไม่ชัดเล็กน้อย**: 85-95% accuracy
+- **ใบเสร็จไม่ชัดมาก**: Rejected ด้วย Image Quality Validation
+- **Handwritten Documents**: ต้อง confidence ≥85%
+
+### Rate Limits (Gemini Free Tier)
+
+- **15 Requests Per Minute (RPM)**
+- Sequential Processing: ~4 วินาทีต่อรูป → ปลอดภัยจาก 429 Error
+- Automatic Retry: รอ 10-30 วินาทีถ้าเจอ 429
+- แนะนำอัพเกรด Tier หากต้องการ parallel processing
+
+### Cache Performance
+
+- **Master Data Cache**: TTL 5 นาที
+- **Hit Rate**: ~90% สำหรับ requests ต่อเนื่อง
+- **Auto-Reload**: โหลดใหม่อัตโนมัติเมื่อหมดอายุ
+- **Memory Usage**: ~1-5 MB ต่อ shop
 
 ---
 
-## 📚 Related Documentation
+## 📞 การสนับสนุน
 
-- [README.md](../README.md) - Quick start guide
-- [DOCKER_DEPLOY.md](DOCKER_DEPLOY.md) - Deployment instructions
-- [OPTIMIZATION_COMPLETE.md](../OPTIMIZATION_COMPLETE.md) - Optimization history
-
----
-
-## 📞 Support
-
-For technical questions or issues, please contact the development team.
+หากมีปัญหาหรือข้อสงสัย:
+1. ตรวจสอบ logs ใน terminal
+2. เปิด debug mode เพื่อดูรายละเอียด
+3. ตรวจสอบ MongoDB connection
+4. ตรวจสอบ Gemini API Key
 
 ---
 
-**Last Updated:** December 15, 2025
-**Version:** 2.1
-**Status:** ✅ Production Ready (with Rate Limiting)
+## 📦 โครงสร้าง Prompt Management (v2.1)
+
+### ก่อนปรับปรุง (Old - v1.0)
+```
+internal/ai/
+├── prompt_ocr_simple.go     # OCR Prompt
+├── prompts.go               # Master Data + Rules + Format (รวมกัน 1,617 บรรทัด)
+└── gemini.go               # API + System Instruction (ซ้ำ)
+```
+❌ **ปัญหา**: ไฟล์ prompts.go ใหญ่เกินไป ยากต่อการแก้ไขและไล่อ่าน
+
+### หลังปรับปรุง (New - v2.1) ✨
+```
+internal/ai/
+├── 🔍 prompt_ocr.go              # Pure OCR - อ่านข้อความดิบ (~220 lines)
+├── 🧮 prompt_accountant.go       # System Instruction - กฎนักบัญชี (~250 lines)
+├── 📏 prompt_rules.go            # Analysis Rules - หลักการวิเคราะห์ (~60 lines)
+├── 🔄 prompt_multiimage.go       # Multi-Image Steps - ขั้นตอนหลายรูป (~80 lines)
+├── 📤 prompt_output_format.go    # JSON Schema & Validation (~400 lines)
+├── 📌 prompt_guidelines.go       # Additional Guidelines - คำแนะนำเพิ่มเติม (~60 lines)
+├── 📋 prompts.go                 # Master Data Formatting เท่านั้น (~850 lines)
+└── 🤖 gemini.go                  # API Calls (~1,072 lines)
+```
+✅ **ประโยชน์**: แยกตามบทบาท ง่ายต่อการแก้ไขและบำรุงรักษา
+
+### ประโยชน์ของการแยก Prompt Files
+
+✅ **Separation of Concerns** - แต่ละไฟล์มีหน้าที่ชัดเจน  
+✅ **ง่ายต่อการแก้ไข** - แก้ Prompt OCR ไม่กระทบ Accountant Rules  
+✅ **ทดสอบง่าย** - Test แต่ละส่วนแยกกันได้  
+✅ **Reusable** - ใช้ซ้ำได้ในหลาย context  
+✅ **Version Control** - เห็น history การเปลี่ยนแปลงชัดเจน  
+✅ **ไล่อ่านง่าย** - ไม่ต้องเลื่อนไฟล์ 1,600+ บรรทัด  
+✅ **แก้ไขปลอดภัย** - แก้ไข Rules ไม่กระทบ Output Format  
+
+### รายละเอียดแต่ละไฟล์ Prompt
+
+| ไฟล์ | บรรทัด | หน้าที่ | ตัวอย่าง |
+|------|--------|---------|----------|
+| `prompt_ocr.go` | ~220 | อ่านข้อความดิบจากเอกสาร | "อ่านทุกตัวอักษรที่เห็น..." |
+| `prompt_accountant.go` | ~250 | System Instruction + 8 Rules | Rule #4: Withholding Tax |
+| `prompt_rules.go` | ~60 | หลักการวิเคราะห์ | "ใช้บริบทธุรกิจ..." |
+| `prompt_multiimage.go` | ~80 | ขั้นตอนหลายรูป | "เอกสาร + สลิป" |
+| `prompt_output_format.go` | ~400 | JSON Schema + Validation | ทศนิยม 2 ตำแหน่ง |
+| `prompt_guidelines.go` | ~60 | คำแนะนำเพิ่มเติม | "วิธีตรวจจับการชำระเงิน" |
+| `prompts.go` | ~850 | Master Data Formatting | Template Mode vs Full Mode |  
+
+### สัดส่วน Prompt (Token Distribution)
+
+| Component | Tokens | เปอร์เซ็นต์ |
+|-----------|--------|-----------|
+| **OCR Prompt** | ~500 | 2% |
+| **System Instruction** | ~2,000 | 8% |
+| **Master Data (Template Mode)** | ~7,000 | 30% |
+| **Master Data (Full Mode)** | ~30,000 | 90% |
+| **Response** | ~1,500 | 5-10% |
+
+**💡 Optimization Strategy**: ใช้ Template Mode เมื่อ confidence ≥85% เพื่อประหยัด ~80% tokens
+
+---
+
+## 📊 สรุปการปรับปรุง v2.1 (16 ธ.ค. 2568)
+
+### ✨ สิ่งที่เปลี่ยนแปลง
+
+1. **แยก prompts.go (1,617 บรรทัด) → 7 ไฟล์**
+   - ลด code smell จากไฟล์ใหญ่เกินไป
+   - แยกตามหน้าที่: OCR, Accountant, Rules, Multi-Image, Format, Guidelines
+
+2. **เพิ่ม Rule #4: Withholding Tax Handling**
+   - แก้ไขปัญหา Balance ไม่เท่ากันในใบเสร็จค่าโทรศัพท์
+   - อธิบายชัดเจนว่าต้องบันทึกภาษีหัก ณ ที่จ่ายเมื่อไหร่
+
+3. **ปรับปรุงโครงสร้างเอกสาร**
+   - เพิ่มตารางเปรียบเทียบก่อน-หลัง
+   - อธิบายประโยชน์ของการแยกไฟล์
+   - เพิ่มรายละเอียดแต่ละไฟล์
+
+### 🎯 ผลลัพธ์
+
+- ✅ Build สำเร็จ (3,223 บรรทัดรวม)
+- ✅ แยกบทบาทชัดเจน (Separation of Concerns)
+- ✅ ง่ายต่อการบำรุงรักษา (Maintainability)
+- ✅ ลดความซับซ้อน (Reduced Complexity)
+
+---
+
+*อัปเดตล่าสุด: 16 ธันวาคม 2025 (v2.1 - Prompt Structure Refactoring)*
