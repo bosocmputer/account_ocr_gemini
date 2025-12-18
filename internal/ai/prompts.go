@@ -179,35 +179,6 @@ func extractTemplateGuidance(matchedTemplate *bson.M) string {
 %s
 
 ⚠️ ปฏิบัติตามคำแนะนำนี้อย่างเคร่งครัดในการลงตัวเลข
-
-🚨 **CRITICAL - การคำนวณทศนิยมสำหรับ Template นี้ (ห้ามผิดพลาด!)**:
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-⚠️ **ห้ามปัดเศษ - ใช้ทศนิยม 2 ตำแหน่งเท่านั้น**
-
-**กฎการคำนวณ (เฉพาะ Template นี้):**
-- ใช้ทศนิยม **2 ตำแหน่งเท่านั้น** (ไม่มากกว่า ไม่น้อยกว่า)
-- **ห้ามปัดเศษ** ทุกกรณี แม้แต่ 0.01 บาท
-- คำนวณตามสูตรที่ระบุใน Template Guidance ข้างต้น
-- ตรวจสอบผลการคำนวณด้วยเครื่องคิดเลขก่อนส่งคำตอบ
-
-**ตัวอย่างการคำนวณที่ถูกต้อง:**
-
-✅ **ถูก:**
-- 22,582.43 - 677.47 = **21,904.96** ✓
-- 10,000.00 - 300.00 = **9,700.00** ✓  
-- 5,350.25 + 374.75 = **5,725.00** ✓
-- 1,869.16 + 130.84 = **2,000.00** ✓
-
-❌ **ผิด (ห้ามทำ):**
-- 22,582.43 - 677.47 = 21,905.96 ❌ (ผิด! ควรเป็น 21,904.96)
-- 22,582.43 - 677.47 = 21,904.96 ≈ 21,905 ❌ (ห้ามปัดเศษ!)
-- 10,000 - 300 = 9,700 → แสดงเป็น 9700 ❌ (ต้องมีทศนิยม: 9,700.00)
-
-**การตรวจสอบ:**
-- ✓ เช็คทุกตัวเลขที่คำนวณด้วยเครื่องคิดเลข
-- ✓ เช็คผลรวม Debit และ Credit (ทศนิยม 2 ตำแหน่ง)
-- ✓ ถ้าผลลัพธ์ผิด → ย้อนกลับไปตรวจสอบการคำนวณใหม่
 `, promptStr)
 		}
 	}
@@ -236,19 +207,8 @@ func BuildMultiImageAccountingPrompt(allResultsJSON string, mode MasterDataMode,
 	validationRules := GetValidationRequirements()
 	additionalGuidelines := GetAdditionalGuidelines()
 
-	// Emphasize template guidance with highest priority marker
-	if templateGuidance != "" {
-		templateGuidance = fmt.Sprintf(`
-🔴 TEMPLATE GUIDANCE - HIGHEST PRIORITY 🔴
-คำแนะนำนี้มาจาก Template ที่ user กำหนดเอง ต้องปฏิบัติตาม 100%%
-หากคำแนะนำนี้ขัดแย้งกับ System Rules → ให้ทำตาม Template Guidance
-
-%s
-
-⚠️ YOU MUST FOLLOW THE ABOVE TEMPLATE GUIDANCE STRICTLY - IT OVERRIDES ALL SYSTEM RULES
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-`, templateGuidance)
-	}
+	// Template guidance is already emphasized in System Instruction
+	// No need to duplicate the emphasis here
 
 	return fmt.Sprintf(`คุณคือนักบัญชีไทยผู้เชี่ยวชาญ วิเคราะห์รูปภาพหลายรูปที่เกี่ยวข้องกัน แล้วสร้างรายการบัญชีเดียวที่รวมแล้ว
 %s%s

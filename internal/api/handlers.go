@@ -496,9 +496,9 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			os.Remove(tempFilename) // cleanup
 			reqCtx.EndStep("failed", nil, err)
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":       "Failed to save downloaded file",
-				"details":     err.Error(),
-				"request_id":  reqCtx.RequestID,
+				"error":      "Failed to save downloaded file",
+				"details":    err.Error(),
+				"request_id": reqCtx.RequestID,
 			})
 			return
 		}
@@ -913,7 +913,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		"confidence_breakdown": map[string]interface{}{
 			"factors": map[string]interface{}{
 				"template_match":     confidenceResult.Factors.TemplateMatch,
-				"vendor_match":       confidenceResult.Factors.VendorMatch,
+				"party_match":        confidenceResult.Factors.PartyMatch,
 				"data_completeness":  confidenceResult.Factors.DataCompleteness,
 				"field_validation":   confidenceResult.Factors.FieldValidation,
 				"balance_validation": confidenceResult.Factors.BalanceValidation,
@@ -921,12 +921,24 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			"explanations": confidenceResult.Breakdown,
 			"weights": map[string]interface{}{
 				"template_match":     processor.DefaultWeights.TemplateMatch * 100,
-				"vendor_match":       processor.DefaultWeights.VendorMatch * 100,
+				"party_match":        processor.DefaultWeights.PartyMatch * 100,
 				"data_completeness":  processor.DefaultWeights.DataCompleteness * 100,
 				"field_validation":   processor.DefaultWeights.FieldValidation * 100,
 				"balance_validation": processor.DefaultWeights.BalanceValidation * 100,
 			},
+			"calculation": map[string]interface{}{
+				"formula": "(เทมเพลต×30%) + (คู่ค้า×25%) + (ข้อมูล×20%) + (ฟิลด์×15%) + (ยอดเงิน×10%)",
+				"steps": []string{
+					fmt.Sprintf("เทมเพลต: %.0f × 30%% = %.1f", confidenceResult.Factors.TemplateMatch, confidenceResult.Factors.TemplateMatch*0.3),
+					fmt.Sprintf("คู่ค้า: %.0f × 25%% = %.1f", confidenceResult.Factors.PartyMatch, confidenceResult.Factors.PartyMatch*0.25),
+					fmt.Sprintf("ข้อมูล: %.0f × 20%% = %.1f", confidenceResult.Factors.DataCompleteness, confidenceResult.Factors.DataCompleteness*0.2),
+					fmt.Sprintf("ฟิลด์: %.0f × 15%% = %.1f", confidenceResult.Factors.FieldValidation, confidenceResult.Factors.FieldValidation*0.15),
+					fmt.Sprintf("ยอดเงิน: %.0f × 10%% = %.1f", confidenceResult.Factors.BalanceValidation, confidenceResult.Factors.BalanceValidation*0.1),
+				},
+				"total": confidenceResult.OverallScore,
+			},
 		},
+		"review_requirements": generateReviewRequirements(confidenceResult, accountingEntry),
 	}
 
 	// Merge with existing validation data from AI (keep ai_explanation, etc.)
@@ -1618,4 +1630,205 @@ func formatTokenSummary(tokenUsage map[string]interface{}) string {
 	output := tokenUsage["total_output_tokens"]
 	total := tokenUsage["total_tokens"]
 	return fmt.Sprintf("%vเข้า + %vออก = %vรวม", input, output, total)
+}
+
+// getStringFromInterface แปลง interface{} เป็น string
+func getStringFromInterface(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	if str, ok := val.(string); ok {
+		return str
+	}
+	return ""
+}
+
+// generateReviewRequirements สร้างรายละเอียดการตรวจสอบแบบเข้าใจง่าย
+func generateReviewRequirements(confidenceResult processor.ConfidenceResult, accountingEntry map[string]interface{}) map[string]interface{} {
+	if !confidenceResult.RequiresReview {
+		return map[string]interface{}{
+			"ต้องตรวจสอบ":    false,
+			"สามารถบันทึก":   true,
+			"ระดับความสำคัญ": "ไม่มี",
+			"สถานะ":          "✅ ผ่านการตรวจสอบ - พร้อมบันทึกบัญชี",
+			"รายการตรวจสอบ":  []string{},
+			"คำแนะนำ":        "ข้อมูลครบถ้วนและถูกต้อง สามารถบันทึกบัญชีได้เลย",
+		}
+	}
+
+	factors := confidenceResult.Factors
+	score := confidenceResult.OverallScore
+
+	// รายการที่ต้องตรวจสอบ
+	reviewItems := []map[string]interface{}{}
+	missingFields := []string{}
+	recommendations := []string{}
+
+	// ตรวจสอบแต่ละปัจจัย
+	if factors.TemplateMatch < 80 {
+		reviewItems = append(reviewItems, map[string]interface{}{
+			"หัวข้อ":      "🎯 เทมเพลต",
+			"คะแนน":       factors.TemplateMatch,
+			"สถานะ":       getStatusEmoji(factors.TemplateMatch),
+			"ปัญหา":       "เอกสารอาจไม่ตรงกับเทมเพลตที่เลือก",
+			"ต้องตรวจสอบ": "ตรวจสอบว่าเลือกเทมเพลตถูกต้องหรือไม่",
+		})
+		recommendations = append(recommendations, "ตรวจสอบการเลือกเทมเพลต - อาจต้องสร้างเทมเพลตใหม่หรือปรับปรุงเทมเพลตที่มี")
+	}
+
+	if factors.PartyMatch < 80 {
+		debtorCode := getStringFromInterface(accountingEntry["debtor_code"])
+		creditorCode := getStringFromInterface(accountingEntry["creditor_code"])
+
+		party := "คู่ค้า"
+		if debtorCode != "" {
+			party = "ลูกค้า (AR)"
+		} else if creditorCode != "" {
+			party = "เจ้าหนี้ (AP)"
+		}
+
+		reviewItems = append(reviewItems, map[string]interface{}{
+			"หัวข้อ":      "👥 " + party,
+			"คะแนน":       factors.PartyMatch,
+			"สถานะ":       getStatusEmoji(factors.PartyMatch),
+			"ปัญหา":       "ไม่พบข้อมูล" + party + "ในระบบหรือชื่อไม่ตรงกัน",
+			"ต้องตรวจสอบ": "ตรวจสอบชื่อ" + party + "ว่าถูกต้องหรือไม่",
+		})
+
+		if debtorCode == "" && creditorCode == "" {
+			missingFields = append(missingFields, "รหัสลูกค้าหรือเจ้าหนี้")
+			recommendations = append(recommendations, "เพิ่มข้อมูลลูกค้าหรือเจ้าหนี้ลงในระบบ Master Data")
+		} else {
+			recommendations = append(recommendations, "ตรวจสอบชื่อให้ตรงกับข้อมูลในระบบ หรืออัปเดตข้อมูลในระบบให้ตรงกับเอกสาร")
+		}
+	}
+
+	if factors.DataCompleteness < 80 {
+		reviewItems = append(reviewItems, map[string]interface{}{
+			"หัวข้อ":      "📋 ข้อมูล",
+			"คะแนน":       factors.DataCompleteness,
+			"สถานะ":       getStatusEmoji(factors.DataCompleteness),
+			"ปัญหา":       "ข้อมูลไม่ครบถ้วน",
+			"ต้องตรวจสอบ": "เติมข้อมูลที่หายไปให้ครบถ้วน",
+		})
+
+		// ตรวจสอบฟิลด์ที่หายไป
+		if accountingEntry["reference_number"] == nil || accountingEntry["reference_number"] == "" {
+			missingFields = append(missingFields, "เลขที่เอกสาร")
+		}
+		if accountingEntry["document_date"] == nil || accountingEntry["document_date"] == "" {
+			missingFields = append(missingFields, "วันที่")
+		}
+		if entries, ok := accountingEntry["entries"].([]interface{}); ok {
+			for i, entry := range entries {
+				if entryMap, ok := entry.(map[string]interface{}); ok {
+					if entryMap["description"] == nil || entryMap["description"] == "" {
+						missingFields = append(missingFields, fmt.Sprintf("รายละเอียดรายการที่ %d", i+1))
+					}
+				}
+			}
+		}
+
+		if len(missingFields) > 0 {
+			recommendations = append(recommendations, fmt.Sprintf("เติมข้อมูลที่หายไป: %s", strings.Join(missingFields, ", ")))
+		} else {
+			recommendations = append(recommendations, "ตรวจสอบความครบถ้วนของข้อมูลในแต่ละรายการ")
+		}
+	}
+
+	if factors.FieldValidation < 80 {
+		reviewItems = append(reviewItems, map[string]interface{}{
+			"หัวข้อ":      "✏️ รูปแบบ",
+			"คะแนน":       factors.FieldValidation,
+			"สถานะ":       getStatusEmoji(factors.FieldValidation),
+			"ปัญหา":       "รูปแบบข้อมูลบางส่วนไม่ถูกต้อง",
+			"ต้องตรวจสอบ": "ตรวจสอบรูปแบบวันที่, ตัวเลข, รหัสบัญชี",
+		})
+		recommendations = append(recommendations, "ตรวจสอบรูปแบบข้อมูล เช่น วันที่ต้องเป็น YYYY-MM-DD, ตัวเลขต้องเป็นตัวเลขเท่านั้น")
+	}
+
+	if factors.BalanceValidation < 80 {
+		reviewItems = append(reviewItems, map[string]interface{}{
+			"หัวข้อ":      "💰 ยอดเงิน",
+			"คะแนน":       factors.BalanceValidation,
+			"สถานะ":       getStatusEmoji(factors.BalanceValidation),
+			"ปัญหา":       "⚠️ ยอด Debit ไม่เท่ากับ Credit",
+			"ต้องตรวจสอบ": "ตรวจสอบการคำนวณยอดเงินให้ถูกต้อง",
+		})
+		recommendations = append(recommendations, "⚠️ ยอดไม่สมดุล - ต้องแก้ไขก่อนบันทึกบัญชี")
+	}
+
+	// กำหนดระดับความสำคัญ
+	priority := "ต่ำ"
+	priorityEmoji := "🟢"
+	statusMessage := "⚠️ ควรตรวจสอบก่อนบันทึก"
+	canProceed := score >= 70
+
+	if score < 70 {
+		priority = "สูง"
+		priorityEmoji = "🔴"
+		statusMessage = "🛑 ต้องแก้ไขก่อนบันทึก"
+		canProceed = false
+	} else if score < 85 && (factors.DataCompleteness < 70 || factors.FieldValidation < 70 || factors.BalanceValidation < 80) {
+		priority = "กลาง"
+		priorityEmoji = "🟡"
+		statusMessage = "⚠️ แนะนำให้ตรวจสอบก่อนบันทึก"
+	}
+
+	// สรุปคำแนะนำ
+	mainRecommendation := "ตรวจสอบรายการที่มีปัญหาด้านล่าง"
+	if !canProceed {
+		mainRecommendation = "ต้องแก้ไขปัญหาทั้งหมดก่อนจึงจะบันทึกบัญชีได้"
+	} else if priority == "ต่ำ" {
+		mainRecommendation = "สามารถบันทึกบัญชีได้ แต่แนะนำให้ตรวจสอบข้อมูลก่อน"
+	}
+
+	return map[string]interface{}{
+		"ต้องตรวจสอบ":    true,
+		"สามารถบันทึก":   canProceed,
+		"ระดับความสำคัญ": fmt.Sprintf("%s %s", priorityEmoji, priority),
+		"สถานะ":          statusMessage,
+		"คะแนนรวม":       fmt.Sprintf("%.0f/100", score),
+		"รายการตรวจสอบ":  reviewItems,
+		"ฟิลด์ที่หายไป":  missingFields,
+		"คำแนะนำ":        mainRecommendation,
+		"วิธีแก้ไข":      recommendations,
+		"สรุป": map[string]interface{}{
+			"จำนวนปัญหา":   len(reviewItems),
+			"ปัญหาร้ายแรง": countCriticalIssues(confidenceResult),
+			"ควรตรวจสอบ":   len(reviewItems) - countCriticalIssues(confidenceResult),
+		},
+	}
+}
+
+// getStatusEmoji คืนค่า emoji ตามคะแนน
+func getStatusEmoji(score float64) string {
+	if score >= 90 {
+		return "✅ ดีมาก"
+	} else if score >= 80 {
+		return "✓ ดี"
+	} else if score >= 70 {
+		return "⚠️ พอใช้"
+	} else if score >= 60 {
+		return "⚠️ ต่ำ"
+	}
+	return "❌ ต่ำมาก"
+}
+
+// countCriticalIssues นับจำนวนปัญหาร้ายแรง
+func countCriticalIssues(confidenceResult processor.ConfidenceResult) int {
+	critical := 0
+	factors := confidenceResult.Factors
+
+	if factors.BalanceValidation < 80 {
+		critical++
+	}
+	if factors.FieldValidation < 60 {
+		critical++
+	}
+	if factors.DataCompleteness < 50 {
+		critical++
+	}
+
+	return critical
 }

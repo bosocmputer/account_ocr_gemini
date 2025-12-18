@@ -14,7 +14,7 @@ import (
 // ConfidenceFactors เก็บคะแนนของแต่ละปัจจัย
 type ConfidenceFactors struct {
 	TemplateMatch     float64 `json:"template_match"`     // คะแนนจากการจับคู่ template (0-100)
-	VendorMatch       float64 `json:"vendor_match"`       // คะแนนจากการจับคู่ vendor (0-100)
+	PartyMatch        float64 `json:"party_match"`        // คะแนนจากการจับคู่คู่ค้า (vendor/debtor) (0-100)
 	DataCompleteness  float64 `json:"data_completeness"`  // คะแนนจากความสมบูรณ์ของข้อมูล (0-100)
 	FieldValidation   float64 `json:"field_validation"`   // คะแนนจากการ validate ฟิลด์ต่างๆ (0-100)
 	BalanceValidation float64 `json:"balance_validation"` // คะแนนจากการตรวจสอบ Debit = Credit (0-100)
@@ -23,7 +23,7 @@ type ConfidenceFactors struct {
 // ConfidenceWeights น้ำหนักของแต่ละปัจจัย (รวมต้องเท่ากับ 1.0)
 type ConfidenceWeights struct {
 	TemplateMatch     float64
-	VendorMatch       float64
+	PartyMatch        float64
 	DataCompleteness  float64
 	FieldValidation   float64
 	BalanceValidation float64
@@ -32,7 +32,7 @@ type ConfidenceWeights struct {
 // DefaultWeights น้ำหนักมาตรฐานที่ใช้ในการคำนวณ
 var DefaultWeights = ConfidenceWeights{
 	TemplateMatch:     0.30, // 30% - Template matching มีความสำคัญมาก
-	VendorMatch:       0.25, // 25% - Vendor matching สำคัญรองลงมา
+	PartyMatch:        0.25, // 25% - Party matching (vendor/debtor) สำคัญรองลงมา
 	DataCompleteness:  0.20, // 20% - ความสมบูรณ์ของข้อมูล
 	FieldValidation:   0.15, // 15% - การ validate ฟิลด์ต่างๆ
 	BalanceValidation: 0.10, // 10% - การตรวจสอบยอด Debit = Credit
@@ -58,7 +58,7 @@ func CalculateWeightedConfidence(
 	// คำนวณคะแนนแต่ละปัจจัย
 	factors := ConfidenceFactors{
 		TemplateMatch:     getTemplateConfidenceScore(templateMatchResult),
-		VendorMatch:       getVendorConfidenceScore(vendorMatchResult),
+		PartyMatch:        getPartyConfidenceScore(vendorMatchResult, accountingEntry),
 		DataCompleteness:  calculateCompletenessScore(accountingEntry),
 		FieldValidation:   calculateFieldValidationScore(accountingEntry),
 		BalanceValidation: calculateBalanceScore(accountingEntry),
@@ -66,7 +66,7 @@ func CalculateWeightedConfidence(
 
 	// คำนวณคะแนนรวมแบบถ่วงน้ำหนัก
 	overallScore := (factors.TemplateMatch * DefaultWeights.TemplateMatch) +
-		(factors.VendorMatch * DefaultWeights.VendorMatch) +
+		(factors.PartyMatch * DefaultWeights.PartyMatch) +
 		(factors.DataCompleteness * DefaultWeights.DataCompleteness) +
 		(factors.FieldValidation * DefaultWeights.FieldValidation) +
 		(factors.BalanceValidation * DefaultWeights.BalanceValidation)
@@ -87,7 +87,7 @@ func CalculateWeightedConfidence(
 	if reqCtx != nil {
 		reqCtx.LogInfo("📊 Confidence Calculation:")
 		reqCtx.LogInfo("  ├─ Template Match: %.1f%% (weight: %.0f%%)", factors.TemplateMatch, DefaultWeights.TemplateMatch*100)
-		reqCtx.LogInfo("  ├─ Vendor Match: %.1f%% (weight: %.0f%%)", factors.VendorMatch, DefaultWeights.VendorMatch*100)
+		reqCtx.LogInfo("  ├─ Party Match: %.1f%% (weight: %.0f%%)", factors.PartyMatch, DefaultWeights.PartyMatch*100)
 		reqCtx.LogInfo("  ├─ Data Completeness: %.1f%% (weight: %.0f%%)", factors.DataCompleteness, DefaultWeights.DataCompleteness*100)
 		reqCtx.LogInfo("  ├─ Field Validation: %.1f%% (weight: %.0f%%)", factors.FieldValidation, DefaultWeights.FieldValidation*100)
 		reqCtx.LogInfo("  ├─ Balance Validation: %.1f%% (weight: %.0f%%)", factors.BalanceValidation, DefaultWeights.BalanceValidation*100)
@@ -113,18 +113,43 @@ func getTemplateConfidenceScore(result *TemplateMatchResult) float64 {
 	return result.Confidence
 }
 
-// getVendorConfidenceScore คำนวณคะแนนจากการจับคู่ vendor
-func getVendorConfidenceScore(result *VendorMatchResult) float64 {
-	if result == nil {
-		return 50.0 // กรณีไม่มีการ matching ให้คะแนนกลางๆ
+// getPartyConfidenceScore คำนวณคะแนนจากการจับคู่คู่ค้า (vendor หรือ debtor)
+func getPartyConfidenceScore(vendorResult *VendorMatchResult, accountingEntry map[string]interface{}) float64 {
+	// ตรวจสอบว่าเป็นเอกสารขาย (มี debtor) หรือ ซื้อ (มี creditor)
+	debtorCode := getStringFromInterface(accountingEntry["debtor_code"])
+	creditorCode := getStringFromInterface(accountingEntry["creditor_code"])
+
+	// ถ้าเป็นเอกสารขาย (มี debtor)
+	if debtorCode != "" && debtorCode != "null" {
+		// ใช้คะแนนจาก debtor matching
+		// ถ้า debtor_code มีค่า แสดงว่าจับคู่สำเร็จ ให้คะแนน 80
+		return 80.0
 	}
 
-	if !result.Found {
-		return 0.0 // ไม่เจอ vendor = 0 คะแนน
+	// ถ้าเป็นเอกสารซื้อ (มี creditor) ใช้ vendor match result
+	if creditorCode != "" && creditorCode != "null" {
+		if vendorResult == nil {
+			return 50.0
+		}
+		if !vendorResult.Found {
+			return 0.0
+		}
+		return vendorResult.Similarity
 	}
 
-	// ใช้ similarity score จาก vendor matching (0-100)
-	return result.Similarity
+	// ไม่มีทั้ง debtor และ creditor
+	return 0.0
+}
+
+// getStringFromInterface แปลงค่าจาก interface{} เป็น string
+func getStringFromInterface(val interface{}) string {
+	if val == nil {
+		return ""
+	}
+	if str, ok := val.(string); ok {
+		return str
+	}
+	return ""
 }
 
 // calculateCompletenessScore คำนวณคะแนนจากความสมบูรณ์ของข้อมูล
@@ -307,15 +332,24 @@ func generateBreakdown(
 		breakdown["template_match"] = "ไม่พบ template ที่ตรงกัน"
 	}
 
-	// Vendor Match
-	if vendorMatchResult == nil {
-		breakdown["vendor_match"] = "ไม่มีข้อมูล vendor matching"
+	// Party Match (Vendor/Debtor)
+	debtorCode := getStringFromInterface(accountingEntry["debtor_code"])
+	creditorCode := getStringFromInterface(accountingEntry["creditor_code"])
+
+	if debtorCode != "" && debtorCode != "null" {
+		// เอกสารขาย - มี debtor
+		breakdown["party_match"] = "พบลูกค้า (Debtor) ในระบบ"
+	} else if creditorCode != "" && creditorCode != "null" {
+		// เอกสารซื้อ - มี creditor
+		breakdown["party_match"] = "พบผู้ขาย (Creditor) ในระบบ"
+	} else if vendorMatchResult == nil {
+		breakdown["party_match"] = "ไม่มีข้อมูล party matching"
 	} else if !vendorMatchResult.Found {
-		breakdown["vendor_match"] = "ไม่พบ vendor ในระบบ - ต้องตรวจสอบ"
+		breakdown["party_match"] = "ไม่พบคู่ค้าในระบบ - ต้องตรวจสอบ"
 	} else if vendorMatchResult.Method == "exact" || vendorMatchResult.Method == "tax_id" {
-		breakdown["vendor_match"] = "พบ vendor ตรงกัน 100%"
+		breakdown["party_match"] = "พบคู่ค้าตรงกัน 100%"
 	} else if vendorMatchResult.Method == "fuzzy" {
-		breakdown["vendor_match"] = "พบ vendor คล้ายกัน (fuzzy matching)"
+		breakdown["party_match"] = "พบคู่ค้าคล้ายกัน (fuzzy matching)"
 	}
 
 	// Data Completeness
