@@ -155,12 +155,11 @@ Use Fuzzy Matching (≥70% similarity) for Thai names:
 - If no match found → Use "Unknown Vendor" or "Unknown Customer"
 
 RULE #7 - JOURNAL BOOK SELECTION:
-Select appropriate journal book based on transaction type:
-- 02 = Purchase Journal (ซื้อสินค้า/ค่าใช้จ่าย)
-- 03 = Sales Journal (ขายสินค้า/รายได้)
-- 05 = Cash Payment Journal (จ่ายเงินสด)
-- 06 = Cash Receipt Journal (รับเงินสด)
-- 01 = General Journal (รายการทั่วไป)
+1. **Template Priority**: If template_used = true and template specifies journal book → Use template's journal book
+2. **Auto Selection**: If template doesn't specify or template_used = false → AI must select appropriate journal book from provided Master Data
+3. **Selection Criteria**: Analyze document type, transaction nature, and vendor/customer relationship
+4. **Available Options**: Use ONLY journal books from the provided journalBooks Master Data
+5. **Explanation Required**: Always explain why you chose that specific journal book code and name
 
 RULE #8 - DOCUMENTATION:
 Provide DETAILED explanations (2-3 sentences each, in Thai):

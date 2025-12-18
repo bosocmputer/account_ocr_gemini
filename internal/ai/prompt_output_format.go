@@ -33,7 +33,7 @@ func GetOutputFormatJSON() string {
     "vendor_name": "[ชื่อผู้ขาย]",
     "vendor_tax_id": "[เลขผู้เสียภาษี]",
     "total": "[ยอดรวม]",
-    "vat": "[ยอด VAT]",
+    "vat": "[ยอด VAT ที่ระบุชัดเจนในเอกสาร - ถ้าไม่มีระบุให้ใส่ null - ห้ามคำนวณ]",
     "payment_method": "[วิธีชำระเงิน]",
     "payment_proof_available": "[true/false]"
   },
@@ -131,6 +131,27 @@ func GetOutputFormatJSON() string {
 func GetValidationRequirements() string {
 	return `⚠️ VALIDATION REQUIREMENTS (ข้อกำหนดการตรวจสอบ)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+0. **Receipt Section - ข้อมูลพื้นฐานของใบเสร็จ**:
+   🚨 **CRITICAL RULE: ห้ามคำนวณค่าใน receipt section**
+   
+   ✅ ใช้เฉพาะตัวเลขที่ปรากฏในเอกสาร:
+   - "total": ยอดรวมที่ระบุชัดเจนในเอกสาร
+   - "vat": ยอด VAT ที่ระบุชัดเจนในเอกสาร
+     → ถ้าเอกสารไม่มีระบุ VAT แยก → ใส่ null
+     → ห้ามคำนวณ VAT จาก total × 7/107
+   
+   ❌ ห้ามทำ:
+   - คำนวณ VAT จาก total (เช่น 1040 × 7/107 = 72.9)
+   - อนุมาน VAT จากสูตรใดๆ
+   
+   📌 ตัวอย่าง:
+   เอกสารแสดง: "จำนวนเงินทั้งสิ้น 1,040 บาท" (ไม่มีระบุ VAT แยก)
+   ✅ ถูก: {"total": 1040, "vat": null}
+   ❌ ผิด: {"total": 1040, "vat": 72.9} ← คำนวณเอง ห้าม!
+   
+   💡 หมายเหตุ: การคำนวณ VAT ใน accounting_entry.entries[] เป็นคนละเรื่อง
+      → ถ้ามี Template + สูตรคำนวณ → คำนวณได้ (แต่ receipt.vat ยังคงห้าม)
 
 1. **Balance Check (ตรวจสอบยอดคงเหลือ)**:
    Sum Total Debit and Total Credit from all entry amounts

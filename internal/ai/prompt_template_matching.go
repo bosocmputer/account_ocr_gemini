@@ -232,6 +232,12 @@ When NO template matches:
     - Journal Books (สมุดรายวัน) - ONLY use journal codes from this list
     - Creditors/Debtors (เจ้าหนี้/ลูกหนี้)
 
+  ✓ Journal Book Auto-Selection Rules:
+    - วิเคราะห์ประเภทเอกสาร (ซื้อ/ขาย/ทั่วไป)
+    - ดูลักษณะธุรกรรม (เงินสด/เครดิต/โอน)
+    - เลือก journal book ที่เหมาะสมจาก journalBooks list
+    - อธิบายเหตุผลในการเลือก
+
   ✓ Apply standard Thai accounting practices
 
   ✓ Add tax accounts if receipt shows VAT/WHT (CRITICAL RULE):
