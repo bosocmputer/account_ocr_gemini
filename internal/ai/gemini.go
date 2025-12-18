@@ -363,7 +363,10 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	// Step 2: Initialize the Gemini client
 	reqCtx.StartSubStep("init_gemini_client")
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(configs.GEMINI_API_KEY))
+	// Use us-central1 endpoint to avoid region restrictions
+	client, err := genai.NewClient(ctx,
+		option.WithAPIKey(configs.GEMINI_API_KEY),
+		option.WithEndpoint("https://generativelanguage.googleapis.com"))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
@@ -1052,7 +1055,10 @@ func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 	// Call Gemini API
 	reqCtx.StartSubStep("init_gemini_client")
 	ctx := context.Background()
-	client, err := genai.NewClient(ctx, option.WithAPIKey(configs.GEMINI_API_KEY))
+	// Use us-central1 endpoint to avoid region restrictions
+	client, err := genai.NewClient(ctx,
+		option.WithAPIKey(configs.GEMINI_API_KEY),
+		option.WithEndpoint("https://generativelanguage.googleapis.com"))
 	if err != nil {
 		return "", nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
