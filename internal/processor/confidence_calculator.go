@@ -126,15 +126,14 @@ func getPartyConfidenceScore(vendorResult *VendorMatchResult, accountingEntry ma
 		return 80.0
 	}
 
-	// ถ้าเป็นเอกสารซื้อ (มี creditor) ใช้ vendor match result
+	// ถ้าเป็นเอกสารซื้อ (มี creditor)
 	if creditorCode != "" && creditorCode != "null" {
-		if vendorResult == nil {
-			return 50.0
+		// ถ้ามี creditor_code แล้ว แสดงว่าจับคู่สำเร็จ (จาก vendor_pre_matching หรือ AI Phase 3)
+		// ใช้คะแนนจาก vendorResult ถ้ามี ไม่งั้นให้คะแนน 80 (matched)
+		if vendorResult != nil && vendorResult.Found {
+			return vendorResult.Similarity // ใช้คะแนนจาก vendor_pre_matching
 		}
-		if !vendorResult.Found {
-			return 0.0
-		}
-		return vendorResult.Similarity
+		return 80.0 // AI Phase 3 matched successfully
 	}
 
 	// ไม่มีทั้ง debtor และ creditor

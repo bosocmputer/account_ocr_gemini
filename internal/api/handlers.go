@@ -877,7 +877,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		}
 	}
 
-	// Step 7.5: Fill creditor info from vendor matching result
+	// Step 7.5: Fill creditor/debtor info from multiple sources
 	var accountingEntry map[string]interface{}
 	if ae, ok := accountingResponse["accounting_entry"].(map[string]interface{}); ok {
 		accountingEntry = ae
@@ -885,13 +885,31 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		accountingEntry = map[string]interface{}{}
 	}
 
-	// 🔥 CRITICAL: Auto-fill creditor from vendor matching
+	// Priority 1: Pre-matched vendor from Backend (vendor_pre_matching)
 	if vendorMatchResult.Found {
-		// Override AI's creditor with Backend's matched result
 		accountingEntry["creditor_code"] = vendorMatchResult.Code
 		accountingEntry["creditor_name"] = vendorMatchResult.Name
-		reqCtx.LogInfo("✅ Auto-filled creditor from vendor matching: %s (code: %s)",
+		reqCtx.LogInfo("✅ Auto-filled creditor from vendor_pre_matching: %s (code: %s)",
 			vendorMatchResult.Name, vendorMatchResult.Code)
+	} else {
+		// Priority 2: AI-matched creditor from Phase 3 (from creditor/debtor objects)
+		if creditorObj, ok := accountingResponse["creditor"].(map[string]interface{}); ok {
+			if code := getStringValue(creditorObj, "creditor_code"); code != "" {
+				accountingEntry["creditor_code"] = code
+				accountingEntry["creditor_name"] = getStringValue(creditorObj, "creditor_name")
+				reqCtx.LogInfo("✅ Auto-filled creditor from AI Phase 3: %s (code: %s)",
+					accountingEntry["creditor_name"], code)
+			}
+		}
+
+		if debtorObj, ok := accountingResponse["debtor"].(map[string]interface{}); ok {
+			if code := getStringValue(debtorObj, "debtor_code"); code != "" {
+				accountingEntry["debtor_code"] = code
+				accountingEntry["debtor_name"] = getStringValue(debtorObj, "debtor_name")
+				reqCtx.LogInfo("✅ Auto-filled debtor from AI Phase 3: %s (code: %s)",
+					accountingEntry["debtor_name"], code)
+			}
+		}
 	}
 
 	// Step 7.6: Calculate weighted confidence score
