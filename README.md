@@ -27,7 +27,7 @@
 ### 🤖 OCR Providers
 - **Mistral OCR** - $2/1K pages, URL-based (แนะนำสำหรับ PDF URLs)
 - **Gemini OCR** - Token-based, Image preprocessing
-- Config-based selection ผ่าน `OCR_PROVIDER` env variable
+- **Request-based selection** - Frontend ระบุ provider ผ่าน `model` field ใน request body
 
 ### 📊 Processing Pipeline
 1. **Pure OCR** - อ่านข้อความดิบ (~2K tokens)
@@ -92,12 +92,11 @@ go mod download
 ### Configuration
 สร้างไฟล์ `.env`:
 ```env
-# OCR Provider (เลือก mistral หรือ gemini)
-OCR_PROVIDER=mistral
+# API Keys (ต้องมีทั้ง 2 keys)
 MISTRAL_API_KEY=your_mistral_key
 MISTRAL_MODEL_NAME=mistral-ocr-latest
 
-# Gemini (สำหรับ Template + Accounting)
+# Gemini (สำหรับ OCR + Template + Accounting)
 GEMINI_API_KEY=your_gemini_key
 OCR_MODEL_NAME=gemini-2.5-flash-lite
 TEMPLATE_MODEL_NAME=gemini-2.5-flash-lite
@@ -106,6 +105,9 @@ ACCOUNTING_MODEL_NAME=gemini-2.5-flash
 # MongoDB
 MONGO_URI=mongodb://localhost:27017
 MONGO_DB_NAME=your_database
+
+# หมายเหตุ: OCR provider (gemini/mistral) ระบุโดย frontend
+# ผ่าน field 'model' ใน request body ไม่ได้กำหนดใน .env
 ```
 
 ### 3. Setup MongoDB
@@ -141,6 +143,7 @@ curl -X POST http://localhost:8080/api/v1/analyze-receipt \
   -H "Content-Type: application/json" \
   -d '{
     "shopid": "36gw9v2oP2Rmg98lIovlQ6Dbcfh",
+    "model": "mistral",
     "imagereferences": [{
       "documentimageguid": "36gwYCpY7QlbF6tfT9B8ekE1N9Q",
       "imageuri": "https://storage.blob.core.windows.net/container/image.jpg"
@@ -178,9 +181,13 @@ curl -X POST http://localhost:8080/api/v1/analyze-receipt \
 
 ## 🆕 Updates
 
+**v2.6 - Request-based Model Selection** (Dec 19, 2025)
+- ✅ Frontend controls OCR provider via `model` field in request
+- ✅ Validation: model must be "gemini" or "mistral"
+- ✅ Applies to both /analyze-receipt and /test-template endpoints
+
 **v2.5 - Multi OCR Provider** (Dec 19, 2025)
 - ✅ Mistral OCR 3 support ($2/1K pages, URL-based)
-- ✅ Config-based provider selection (Mistral/Gemini)
 - ✅ Separate cost tracking (OCR + AI Processing)
 
 **v2.4 - PDF Support** (Dec 17, 2025)  

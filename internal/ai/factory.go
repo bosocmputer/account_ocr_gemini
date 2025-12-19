@@ -9,11 +9,10 @@ import (
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 )
 
-// CreateOCRProvider creates an OCR provider based on configuration
-func CreateOCRProvider() (OCRProvider, error) {
-	provider := configs.OCR_PROVIDER
-
-	switch provider {
+// CreateOCRProvider creates an OCR provider based on provider name
+// providerName: "gemini" or "mistral"
+func CreateOCRProvider(providerName string) (OCRProvider, error) {
+	switch providerName {
 	case "gemini":
 		log.Printf("🔵 Creating Gemini OCR provider")
 		return NewGeminiProvider(configs.GEMINI_API_KEY, configs.OCR_MODEL_NAME), nil
@@ -23,15 +22,20 @@ func CreateOCRProvider() (OCRProvider, error) {
 		return NewMistralProvider(configs.MISTRAL_API_KEY, configs.MISTRAL_MODEL_NAME), nil
 
 	default:
-		return nil, fmt.Errorf("unsupported OCR provider: %s (supported: gemini, mistral)", provider)
+		return nil, fmt.Errorf("unsupported OCR provider: %s (supported: gemini, mistral)", providerName)
 	}
+}
+
+// CreateOCRProviderFromConfig creates an OCR provider based on configuration (deprecated, use CreateOCRProvider)
+func CreateOCRProviderFromConfig() (OCRProvider, error) {
+	return CreateOCRProvider(configs.OCR_PROVIDER)
 }
 
 // CreateOCRProviderWithFallback creates an OCR provider with automatic fallback
 // If the primary provider fails, it will try the fallback provider
 func CreateOCRProviderWithFallback() (primary OCRProvider, fallback OCRProvider, err error) {
-	// Create primary provider
-	primary, err = CreateOCRProvider()
+	// Create primary provider from config
+	primary, err = CreateOCRProviderFromConfig()
 	if err != nil {
 		return nil, nil, err
 	}

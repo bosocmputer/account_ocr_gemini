@@ -137,6 +137,7 @@ type ImageReference struct {
 type ExtractRequest struct {
 	ShopID          string           `json:"shopid"`
 	ImageReferences []ImageReference `json:"imagereferences"`
+	Model           string           `json:"model"` // Required: "gemini" or "mistral"
 }
 
 // JournalEntry represents an accounting entry
@@ -354,8 +355,37 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		return
 	}
 
+	// Validate model (required field)
+	if req.Model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":          "model is required",
+			"message":        "กรุณาระบุ OCR provider ที่ต้องการใช้",
+			"allowed_values": []string{"gemini", "mistral"},
+			"example": map[string]interface{}{
+				"shopid": "your_shop_id",
+				"model":  "mistral",
+				"imagereferences": []map[string]string{
+					{"documentimageguid": "guid", "imageuri": "https://..."},
+				},
+			},
+		})
+		return
+	}
+
+	// Validate model value
+	if req.Model != "gemini" && req.Model != "mistral" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":          "invalid model",
+			"message":        fmt.Sprintf("Model '%s' ไม่ถูกต้อง กรุณาเลือก 'gemini' หรือ 'mistral'", req.Model),
+			"provided_value": req.Model,
+			"allowed_values": []string{"gemini", "mistral"},
+		})
+		return
+	}
+
 	// Create request context for tracking
 	reqCtx := common.NewRequestContext(req.ShopID)
+	reqCtx.LogInfo("🔷 OCR Provider: %s (from request)", req.Model)
 
 	// Log request received with ID for tracking
 	reqCtx.LogInfo("🚀 เริ่มรับคำขอใหม่ | ShopID: %s | เวลา: %s", req.ShopID, time.Now().Format("15:04:05"))
@@ -564,13 +594,14 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	// Parallel processing (3 workers) causes burst traffic → 429 errors
 	numWorkers := 1 // Sequential processing - safe for Tier 1 (15 RPM limit)
 
-	// Create OCR provider (supports Gemini/Mistral based on config)
-	ocrProvider, err := ai.CreateOCRProvider()
+	// Create OCR provider based on request model (gemini or mistral)
+	ocrProvider, err := ai.CreateOCRProvider(req.Model)
 	if err != nil {
 		reqCtx.LogError("Failed to create OCR provider: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":      "OCR provider initialization failed",
 			"details":    err.Error(),
+			"model":      req.Model,
 			"request_id": reqCtx.RequestID,
 		})
 		return
@@ -1309,6 +1340,7 @@ func TestTemplateHandler(c *gin.Context) {
 	// Step 1: Parse multipart form data
 	shopID := c.PostForm("shopid")
 	templateJSON := c.PostForm("template")
+	model := c.PostForm("model")
 
 	// Validate required fields
 	if shopID == "" {
@@ -1321,6 +1353,24 @@ func TestTemplateHandler(c *gin.Context) {
 	if templateJSON == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": "template is required (JSON string)",
+		})
+		return
+	}
+
+	// Validate model field
+	if model == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "กรุณาระบุ model ที่ต้องการใช้งาน (gemini หรือ mistral) ในฟิลด์ 'model'",
+			"example": gin.H{
+				"model": "gemini",
+			},
+		})
+		return
+	}
+
+	if model != "gemini" && model != "mistral" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "model ที่ระบุไม่ถูกต้อง กรุณาเลือก 'gemini' หรือ 'mistral' เท่านั้น",
 		})
 		return
 	}
@@ -1439,10 +1489,10 @@ func TestTemplateHandler(c *gin.Context) {
 
 	// Step 6: Process with OCR (Phase 1)
 	reqCtx.StartStep("pure_ocr_extraction_all")
-	reqCtx.LogInfo("Pure OCR extraction (raw text only) for 1 image(s)")
+	reqCtx.LogInfo("Pure OCR extraction (raw text only) for 1 image(s) using %s", model)
 
-	// Create OCR provider (supports Gemini/Mistral based on config)
-	ocrProvider, err := ai.CreateOCRProvider()
+	// Create OCR provider using model from request
+	ocrProvider, err := ai.CreateOCRProvider(model)
 	if err != nil {
 		reqCtx.LogError("Failed to create OCR provider: %v", err)
 		reqCtx.EndStep("failed", nil, err)

@@ -249,7 +249,7 @@ flowchart LR
 
 ### Phase 1: Pure OCR + Image Quality Validation
 - **ฟังก์ชัน**: `ProcessPureOCR()` (OCRProvider interface)
-- **OCR Providers** (Config-based selection via `OCR_PROVIDER`):
+- **OCR Providers** (Request-based selection via `model` field in request body):
   - **Mistral OCR** (`mistral.go`):
     - โมเดล: mistral-ocr-latest (mistral-ocr-2512)
     - ราคา: $2 per 1,000 pages (฿0.07/page)
@@ -261,6 +261,7 @@ flowchart LR
     - ราคา: Token-based ($0.10/1M input, $0.40/1M output)
     - File-based: ดาวน์โหลดและ preprocess ก่อนส่ง
     - รองรับ: PDF, JPEG, PNG (ทั้ง local และ URL)
+- **การเลือก Provider**: Frontend ส่ง `"model": "gemini"` หรือ `"model": "mistral"` ใน request body
 - อ่านข้อความดิบจากรูปภาพหรือ PDF ทั้งหมด (raw_document_text)
 - **รองรับ File Types**:
   - **PDF Files** (application/pdf): Mistral ใช้ URL โดยตรง, Gemini ส่ง raw bytes
@@ -464,10 +465,10 @@ Content-Type: application/json
 | Variable | ค่า Default | คำอธิบาย |
 |----------|-------------|----------|
 | **OCR Provider Configuration** | | |
-| `OCR_PROVIDER` | gemini | OCR Provider: "mistral" หรือ "gemini" |
-| `MISTRAL_API_KEY` | (optional) | API Key สำหรับ Mistral AI (ถ้าใช้ Mistral) |
+| `MISTRAL_API_KEY` | (required) | API Key สำหรับ Mistral AI |
 | `MISTRAL_MODEL_NAME` | mistral-ocr-latest | โมเดล Mistral OCR (mistral-ocr-2512) |
-| `GEMINI_API_KEY` | (required) | API Key สำหรับ Gemini (Template + Accounting) |
+| `GEMINI_API_KEY` | (required) | API Key สำหรับ Gemini (OCR + Template + Accounting) |
+| | | **หมายเหตุ**: OCR provider เลือกโดย frontend ผ่าน `model` field ใน request |
 | **Phase-Specific Models** | | |
 | `OCR_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล OCR (Phase 1) - เน้นความแม่นยำไทย |
 | `TEMPLATE_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Template Matching (Phase 2) |
