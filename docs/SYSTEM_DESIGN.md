@@ -248,20 +248,26 @@ flowchart LR
 ## 🔄 3 Phases ของ AI Processing
 
 ### Phase 1: Pure OCR + Image Quality Validation
-- **ฟังก์ชัน**: `ProcessPureOCR()` (gemini.go)
+- **ฟังก์ชัน**: `ProcessPureOCR()` (OCRProvider interface)
+- **OCR Providers** (Config-based selection via `OCR_PROVIDER`):
+  - **Mistral OCR** (`mistral.go`):
+    - โมเดล: mistral-ocr-latest (mistral-ocr-2512)
+    - ราคา: $2 per 1,000 pages (฿0.07/page)
+    - URL-based: รับ URL ของเอกสารโดยตรง ไม่ต้องดาวน์โหลด
+    - รองรับ: PDF URLs, Image URLs (HTTPS)
+    - ข้อจำกัด: ไม่รองรับ PDF เป็น base64
+  - **Gemini OCR** (`gemini.go`):
+    - โมเดล: gemini-2.5-flash-lite
+    - ราคา: Token-based ($0.10/1M input, $0.40/1M output)
+    - File-based: ดาวน์โหลดและ preprocess ก่อนส่ง
+    - รองรับ: PDF, JPEG, PNG (ทั้ง local และ URL)
 - อ่านข้อความดิบจากรูปภาพหรือ PDF ทั้งหมด (raw_document_text)
 - **รองรับ File Types**:
-  - **PDF Files** (application/pdf): ส่ง raw PDF bytes โดยตรง ไม่ต้อง preprocess
-  - **Image Files** (JPEG, PNG): ประมวลผลด้วย **High Quality Preprocessing** (`PreprocessImageHighQuality()`)
-    - Sharpen, Contrast, Brightness, Grayscale enhancement
-    - Fallback to original image หากประมวลผลไม่สำเร็จ
+  - **PDF Files** (application/pdf): Mistral ใช้ URL โดยตรง, Gemini ส่ง raw bytes
+  - **Image Files** (JPEG, PNG): ทั้งสอง provider รองรับ
 - ประหยัด token ~82% เทียบกับการให้ AI แยกโครงสร้างทันที
-- **ตรวจสอบคุณภาพรูปภาพ** ตามเกณฑ์:
-  - Text Clarity Score ≥ 70%
-  - Handwriting Confidence ≥ 85%
-  - Overall Confidence ≥ 70%
-- Return: `raw_document_text` + validation metadata
-- **Sequential Processing**: ประมวลผลทีละไฟล์เพื่อหลีกเลี่ยง Rate Limit 429 Error
+- Return: `raw_document_text` + cost metadata (pages หรือ tokens)
+- **Sequential Processing**: ประมวลผลทีละไฟล์เพื่อหลีกเลี่ยง Rate Limit
 
 ### Phase 2: Template Matching (AI-Driven)
 - **ฟังก์ชัน**: `AnalyzeTemplateMatch()` (template_matcher.go)
@@ -457,7 +463,11 @@ Content-Type: application/json
 
 | Variable | ค่า Default | คำอธิบาย |
 |----------|-------------|----------|
-| `GEMINI_API_KEY` | (required) | API Key สำหรับ Gemini |
+| **OCR Provider Configuration** | | |
+| `OCR_PROVIDER` | gemini | OCR Provider: "mistral" หรือ "gemini" |
+| `MISTRAL_API_KEY` | (optional) | API Key สำหรับ Mistral AI (ถ้าใช้ Mistral) |
+| `MISTRAL_MODEL_NAME` | mistral-ocr-latest | โมเดล Mistral OCR (mistral-ocr-2512) |
+| `GEMINI_API_KEY` | (required) | API Key สำหรับ Gemini (Template + Accounting) |
 | **Phase-Specific Models** | | |
 | `OCR_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล OCR (Phase 1) - เน้นความแม่นยำไทย |
 | `TEMPLATE_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Template Matching (Phase 2) |
@@ -475,7 +485,7 @@ Content-Type: application/json
 | `ACCOUNTING_OUTPUT_PRICE_PER_MILLION` | 2.50 | ราคา Full Accounting output (USD/1M tokens) |
 | `USD_TO_THB` | 36.0 | อัตราแลกเปลี่ยน USD เป็น THB |
 | **MongoDB & Server** | | |
-| `MONGO_URI` | mongodb://103.13.30.32:27017 | Connection String MongoDB |
+| `MONGO_URI` | mongodb://localhost:27017 | Connection String MongoDB |
 | `MONGO_DB_NAME` | smldevdb | ชื่อ Database |
 | `PORT` | 8080 | Port ที่ Server ทำงาน |
 | `UPLOAD_DIR` | uploads | โฟลเดอร์เก็บไฟล์ชั่วคราว (auto-cleanup) |

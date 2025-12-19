@@ -564,10 +564,29 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	// Parallel processing (3 workers) causes burst traffic → 429 errors
 	numWorkers := 1 // Sequential processing - safe for Tier 1 (15 RPM limit)
 
+	// Create OCR provider (supports Gemini/Mistral based on config)
+	ocrProvider, err := ai.CreateOCRProvider()
+	if err != nil {
+		reqCtx.LogError("Failed to create OCR provider: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "OCR provider initialization failed",
+			"details":    err.Error(),
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
 	for w := 0; w < numWorkers; w++ {
 		go func() {
 			for job := range jobsChan {
-				result, pureOCRTokens, err := ai.ProcessPureOCR(job.img.Filename, reqCtx)
+				// For Mistral: use original URL if available, otherwise use local file
+				// For Gemini: always use local file
+				imagePath := job.img.Filename
+				if ocrProvider.GetProviderName() == "mistral" && job.img.URI != "" {
+					imagePath = job.img.URI
+				}
+
+				result, pureOCRTokens, err := ocrProvider.ProcessPureOCR(imagePath, reqCtx)
 				resultsChan <- PureOCRImageResult{
 					ImageIndex: job.img.Index,
 					Result:     result,
@@ -1159,17 +1178,51 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Build metadata with OCR warnings if any
+	// Separate Mistral OCR usage from Gemini AI processing
 	metadata := gin.H{
 		"request_id":       reqCtx.RequestID,
 		"processed_at":     time.Now().Format(time.RFC3339),
 		"duration_sec":     summary["total_duration_sec"],
 		"images_processed": len(downloadedImages),
-		"token_usage": gin.H{
+	}
+
+	// Add OCR provider info and breakdown
+	ocrProviderName := "gemini" // default
+	if ocrProvider != nil {
+		ocrProviderName = ocrProvider.GetProviderName()
+	}
+
+	if ocrProviderName == "mistral" {
+		// Mistral: Show separate OCR and AI processing costs
+		metadata["ocr_provider"] = "mistral"
+		metadata["token_usage"] = gin.H{
+			"ocr_usage": gin.H{
+				"provider":        "mistral",
+				"pages_processed": totalPureOCRTokens.InputTokens, // pages stored as input_tokens
+				"cost_thb":        fmt.Sprintf("฿%.2f", totalPureOCRTokens.CostTHB),
+				"cost_usd":        fmt.Sprintf("$%.6f", totalPureOCRTokens.CostUSD),
+			},
+			"ai_processing": gin.H{
+				"provider":      "gemini",
+				"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"].(int) - totalPureOCRTokens.InputTokens,
+				"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
+				"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
+				"cost_thb":      fmt.Sprintf("฿%.2f", reqCtx.TotalTokens.CostTHB-totalPureOCRTokens.CostTHB),
+			},
+			"total": gin.H{
+				"cost_thb": summary["token_usage"].(map[string]interface{})["cost_thb"],
+				"cost_usd": summary["token_usage"].(map[string]interface{})["cost_usd"],
+			},
+		}
+	} else {
+		// Gemini: Show combined usage (traditional format)
+		metadata["ocr_provider"] = "gemini"
+		metadata["token_usage"] = gin.H{
 			"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
 			"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
 			"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
 			"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
-		},
+		}
 	}
 	// Add OCR warnings if any issues were detected
 	if len(ocrWarnings) > 0 {
@@ -1388,7 +1441,20 @@ func TestTemplateHandler(c *gin.Context) {
 	reqCtx.StartStep("pure_ocr_extraction_all")
 	reqCtx.LogInfo("Pure OCR extraction (raw text only) for 1 image(s)")
 
-	ocrResult, ocrTokens, err := ai.ProcessPureOCR(tempFilePath, reqCtx)
+	// Create OCR provider (supports Gemini/Mistral based on config)
+	ocrProvider, err := ai.CreateOCRProvider()
+	if err != nil {
+		reqCtx.LogError("Failed to create OCR provider: %v", err)
+		reqCtx.EndStep("failed", nil, err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":      "OCR provider initialization failed",
+			"details":    err.Error(),
+			"request_id": reqCtx.RequestID,
+		})
+		return
+	}
+
+	ocrResult, ocrTokens, err := ocrProvider.ProcessPureOCR(tempFilePath, reqCtx)
 	if err != nil {
 		reqCtx.LogError("OCR failed: %v", err)
 		reqCtx.EndStep("failed", nil, err)

@@ -312,11 +312,43 @@ type ExtractionResult struct {
 	RawResponse     string        `json:"raw_response,omitempty"`
 }
 
+// --- GeminiProvider: implements OCRProvider interface ---
+
+// GeminiProvider implements OCRProvider interface for Gemini AI
+type GeminiProvider struct {
+	apiKey    string
+	modelName string
+}
+
+// NewGeminiProvider creates a new Gemini AI provider
+func NewGeminiProvider(apiKey, modelName string) *GeminiProvider {
+	return &GeminiProvider{
+		apiKey:    apiKey,
+		modelName: modelName,
+	}
+}
+
+// GetProviderName returns "gemini"
+func (g *GeminiProvider) GetProviderName() string {
+	return "gemini"
+}
+
+// ProcessPureOCR implements OCRProvider interface
+func (g *GeminiProvider) ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCRResult, *common.TokenUsage, error) {
+	return processPureOCRGemini(imagePath, reqCtx, g.apiKey, g.modelName)
+}
+
 // --- Core Processing Function: Pure OCR (New Simplified Version) ---
 
-// ProcessPureOCR processes the receipt image and extracts ONLY raw text using Gemini API
+// processPureOCRGemini processes the receipt image and extracts ONLY raw text using Gemini API
 // This is faster and cheaper than full structured extraction
+// DEPRECATED: Use GeminiProvider.ProcessPureOCR() instead for new code
 func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCRResult, *common.TokenUsage, error) {
+	return processPureOCRGemini(imagePath, reqCtx, configs.GEMINI_API_KEY, configs.OCR_MODEL_NAME)
+}
+
+func processPureOCRGemini(imagePath string, reqCtx *common.RequestContext, apiKey string, modelName string) (*SimpleOCRResult, *common.TokenUsage, error) {
+	reqCtx.LogInfo("🔵 Using Gemini AI provider (model: %s)", modelName)
 	// Step 1: Preprocess the image with HIGH QUALITY mode for maximum accuracy
 	// This applies aggressive enhancements: sharpen, contrast, brightness, grayscale
 	reqCtx.StartSubStep("image_preprocessing")
@@ -365,7 +397,7 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	ctx := context.Background()
 	// Use us-central1 endpoint to avoid region restrictions
 	client, err := genai.NewClient(ctx,
-		option.WithAPIKey(configs.GEMINI_API_KEY),
+		option.WithAPIKey(apiKey),
 		option.WithEndpoint("https://generativelanguage.googleapis.com"))
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create Gemini client: %w", err)
@@ -373,14 +405,14 @@ func ProcessPureOCR(imagePath string, reqCtx *common.RequestContext) (*SimpleOCR
 	defer client.Close()
 
 	// Use OCR-specific model for Phase 1
-	model := client.GenerativeModel(configs.OCR_MODEL_NAME)
+	model := client.GenerativeModel(modelName)
 
 	// Set explicit MaxOutputTokens to prevent silent truncation
 	model.GenerationConfig = genai.GenerationConfig{
 		MaxOutputTokens: ptr(int32(8192)), // Gemini's max output limit
 	}
 
-	reqCtx.LogInfo("📖 Phase 1 - OCR Model: %s (MaxOutputTokens: 8192)", configs.OCR_MODEL_NAME)
+	reqCtx.LogInfo("📖 Phase 1 - OCR Model: %s (MaxOutputTokens: 8192)", modelName)
 	reqCtx.EndSubStep("")
 
 	// Step 3: Define the simple JSON schema (raw text only)

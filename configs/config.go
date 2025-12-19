@@ -11,8 +11,15 @@ import (
 )
 
 var (
+	// OCR Provider Configuration
+	OCR_PROVIDER string // "gemini" or "mistral"
+
 	// Gemini AI Configuration
 	GEMINI_API_KEY string
+
+	// Mistral AI Configuration
+	MISTRAL_API_KEY    string
+	MISTRAL_MODEL_NAME string
 
 	// Phase-specific Model Configuration
 	OCR_MODEL_NAME                 string
@@ -68,10 +75,22 @@ func LoadConfig() {
 		log.Println("No .env file found, using environment variables")
 	}
 
-	// Required: Gemini API Key
+	// OCR Provider Selection
+	OCR_PROVIDER = getEnv("OCR_PROVIDER", "gemini")
+
+	// Gemini API Key
 	GEMINI_API_KEY = getEnv("GEMINI_API_KEY", "")
-	if GEMINI_API_KEY == "" {
-		log.Fatal("GEMINI_API_KEY environment variable is required")
+
+	// Mistral API Configuration
+	MISTRAL_API_KEY = getEnv("MISTRAL_API_KEY", "")
+	MISTRAL_MODEL_NAME = getEnv("MISTRAL_MODEL_NAME", "mistral-ocr-latest")
+
+	// Validate API keys based on provider
+	if OCR_PROVIDER == "gemini" && GEMINI_API_KEY == "" {
+		log.Fatal("GEMINI_API_KEY is required when OCR_PROVIDER=gemini")
+	}
+	if OCR_PROVIDER == "mistral" && MISTRAL_API_KEY == "" {
+		log.Fatal("MISTRAL_API_KEY is required when OCR_PROVIDER=mistral")
 	}
 
 	// Phase-specific models (customizable via .env)
@@ -91,8 +110,8 @@ func LoadConfig() {
 	ALLOWED_ORIGINS = getEnv("ALLOWED_ORIGINS", "*")
 
 	// MongoDB Configuration
-	MONGO_URI = getEnv("MONGO_URI", "mongodb://103.13.30.32:27017")
-	MONGO_DB_NAME = getEnv("MONGO_DB_NAME", "smldevdb")
+	MONGO_URI = getEnv("MONGO_URI", "mongodb://localhost:27017")
+	MONGO_DB_NAME = getEnv("MONGO_DB_NAME", "your_database_name")
 
 	// Image Processing
 	ENABLE_IMAGE_PREPROCESSING = getEnvBool("ENABLE_IMAGE_PREPROCESSING", true)

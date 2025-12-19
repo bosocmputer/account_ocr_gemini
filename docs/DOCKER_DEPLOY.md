@@ -155,11 +155,11 @@ docker-compose down -v
 **Solution:** Check `MONGO_URI` in `.env` file. Ensure password is URL-encoded.
 
 ```env
-# Correct (URL-encoded)
-MONGO_URI=mongodb://admin:smlaccount%40bcaccount%40aiaccount@host:27017/?authSource=admin
+# Correct (URL-encoded) - Use %40 for @ symbol
+MONGO_URI=mongodb://username:encoded%40password@host:27017/?authSource=admin
 
 # Wrong (not encoded)
-MONGO_URI=mongodb://admin:smlaccount@bcaccount@aiaccount@host:27017/?authSource=admin
+MONGO_URI=mongodb://username:password@with@symbol@host:27017/?authSource=admin
 ```
 
 ### Issue: Port already in use
