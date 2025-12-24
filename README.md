@@ -49,8 +49,8 @@
 2. Pure OCR → อ่านข้อความ (Mistral/Gemini)  
 3. Template Matching → AI จับคู่ template
 4. Accounting Analysis → สร้างรายการบัญชี
-   • Template Mode (≥85%) → ใช้ template (~7K tokens)
-   • Full Mode (<85%) → วิเคราะห์เต็มรูปแบบ (~14K tokens)
+   • Template Mode (≥95%) → ใช้ template (~7K tokens)
+   • Full Mode (<95%) → วิเคราะห์เต็มรูปแบบ (~14K tokens)
 5. Response → Receipt + Accounting + Validation
 ```
 

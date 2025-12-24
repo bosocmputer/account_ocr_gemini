@@ -697,7 +697,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 
 	// Step 3.5: Template Matching Analysis (NEW SMART OPTIMIZATION)
 	// Analyze raw text to see if it matches any predefined accounting template
-	// If match found (≥85% confidence) → Use template-only mode (saves another ~20,000 tokens in Phase 3!)
+	// If match found (≥TEMPLATE_CONFIDENCE_THRESHOLD) → Use template-only mode (saves another ~20,000 tokens in Phase 3!)
 	reqCtx.StartStep("template_matching_analysis")
 	reqCtx.LogInfo("Analyzing text to find matching accounting templates...")
 
@@ -715,7 +715,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	var masterDataMode ai.MasterDataMode
 	var matchedTemplate *bson.M
 
-	if templateMatchResult.Confidence >= 85 && templateMatchResult.Template != nil {
+	if templateMatchResult.Confidence >= configs.TEMPLATE_CONFIDENCE_THRESHOLD && templateMatchResult.Template != nil {
 		// 🎯 TEMPLATE MATCHED - Use optimized path
 		masterDataMode = ai.TemplateOnlyMode
 		matchedTemplate = &templateMatchResult.Template
@@ -727,8 +727,9 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		// ❌ NO TEMPLATE MATCH - Use full master data
 		masterDataMode = ai.FullMode
 		matchedTemplate = nil
-		reqCtx.LogInfo("❌ No template match (Confidence: %.1f%% < 85%%) - Using full master data mode",
-			templateMatchResult.Confidence)
+		reqCtx.LogInfo("❌ No template match (Confidence: %.1f%% < %.0f%%) - Using full master data mode",
+			templateMatchResult.Confidence,
+			configs.TEMPLATE_CONFIDENCE_THRESHOLD)
 	}
 
 	reqCtx.EndStep("success", nil, nil)

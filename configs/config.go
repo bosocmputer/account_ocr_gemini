@@ -27,6 +27,9 @@ var (
 	TEMPLATE_ACCOUNTING_MODEL_NAME string // For template-only mode (high confidence)
 	ACCOUNTING_MODEL_NAME          string // For full analysis mode (low confidence)
 
+	// Template Matching Configuration
+	TEMPLATE_CONFIDENCE_THRESHOLD float64 // Minimum confidence to use template-only mode (default: 95%)
+
 	// Gemini Pricing Configuration (hardcoded based on official Gemini API pricing)
 	// Gemini 2.5 Flash-Lite: $0.10 input, $0.40 output per 1M tokens
 	// Gemini 2.5 Flash: $0.30 input, $2.50 output per 1M tokens
@@ -101,6 +104,9 @@ func LoadConfig() {
 
 	// Pricing is hardcoded based on official Gemini API rates
 	// No need to configure in .env - automatically matches model selection
+
+	// Template Matching Configuration
+	TEMPLATE_CONFIDENCE_THRESHOLD = getEnvFloat("TEMPLATE_CONFIDENCE_THRESHOLD", 95.0)
 
 	// Exchange rate (customizable via .env)
 	USD_TO_THB = getEnvFloat("USD_TO_THB", 36.0)

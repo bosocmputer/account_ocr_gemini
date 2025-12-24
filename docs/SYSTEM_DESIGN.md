@@ -23,7 +23,7 @@ flowchart TD
     G --> H{รูปภาพคุณภาพดี?}
     H -->|ไม่ดี| I[Return Rejection with Suggestions]
     H -->|ดี| J[Phase 2: Template Matching - จับคู่กับ Template]
-    J --> K{Template Match ≥85%?}
+    J --> K{Template Match ≥95%?}
     K -->|ใช่| L[Template-Only Mode - ประหยัด Token]
     K -->|ไม่| M[Full Mode - ใช้ Master Data ทั้งหมด]
     L --> N[Phase 3: AI Accounting Analysis]
@@ -274,8 +274,8 @@ flowchart LR
 - **ฟังก์ชัน**: `AnalyzeTemplateMatch()` (template_matcher.go)
 - ใช้ **Gemini AI** วิเคราะห์ raw_document_text + template descriptions
 - AI เลือก template ที่เหมาะสมพร้อมให้เหตุผล (reasoning)
-- ถ้า Confidence ≥85% → **Template-Only Mode** (ประหยัด ~20,000 tokens ใน Phase 3)
-- ถ้า < 85% → **Full Mode** (ส่ง Chart of Accounts ทั้งหมดให้ AI)
+- ถ้า Confidence ≥95% → **Template-Only Mode** (ประหยัด ~20,000 tokens ใน Phase 3)
+- ถ้า < 95% → **Full Mode** (ส่ง Chart of Accounts ทั้งหมดให้ AI)
 - รองรับ `promptdescription` จาก Template สำหรับคำแนะนำเฉพาะ
 
 ### Phase 3: Accounting Analysis (Multi-Image/PDF Support)
@@ -472,8 +472,8 @@ Content-Type: application/json
 | **Phase-Specific Models** | | |
 | `OCR_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล OCR (Phase 1) - เน้นความแม่นยำไทย |
 | `TEMPLATE_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Template Matching (Phase 2) |
-| `TEMPLATE_ACCOUNTING_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Accounting (Template-only ≥85%) |
-| `ACCOUNTING_MODEL_NAME` | gemini-2.5-flash | โมเดล Accounting (Full analysis <85%) |
+| `TEMPLATE_ACCOUNTING_MODEL_NAME` | gemini-2.5-flash-lite | โมเดล Accounting (Template-only ≥95%) |
+| `ACCOUNTING_MODEL_NAME` | gemini-2.5-flash | โมเดล Accounting (Full analysis <95%) |
 | `MODEL_NAME` | gemini-2.5-flash-lite | (Deprecated) Backward compatibility |
 | **Pricing Configuration** | | |
 | `OCR_INPUT_PRICE_PER_MILLION` | 0.10 | ราคา OCR input (USD/1M tokens) |
@@ -855,7 +855,7 @@ internal/ai/
 | **Master Data (Full Mode)** | ~30,000 | 90% |
 | **Response** | ~1,500 | 5-10% |
 
-**💡 Optimization Strategy**: ใช้ Template Mode เมื่อ confidence ≥85% เพื่อประหยัด ~80% tokens
+**💡 Optimization Strategy**: ใช้ Template Mode เมื่อ confidence ≥95% เพื่อประหยัด ~80% tokens
 
 ---
 

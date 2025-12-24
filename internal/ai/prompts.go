@@ -79,7 +79,7 @@ func formatTemplateOnly(matchedTemplate *bson.M, journalBooks []bson.M, creditor
 %s
 
 ⚡ โหมดประหยัด TOKEN - คุณกำลังอยู่ใน Template-Only Mode:
-- AI จับคู่เจอ template ที่ตรงกับเอกสารนี้แล้ว (ความมั่นใจ ≥85%%)
+- AI จับคู่เจอ template ที่ตรงกับเอกสารนี้แล้ว (ความมั่นใจ ≥95%%)
 - Template = ทางลัดที่ผู้ใช้กำหนดไว้ → ทำตาม template อย่างเคร่งครัด
 
 %s

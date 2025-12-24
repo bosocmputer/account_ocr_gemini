@@ -696,7 +696,7 @@ func createTemplateMatchSchema() *genai.Schema {
 			},
 			"confidence": {
 				Type:        genai.TypeInteger,
-				Description: "ความมั่นใจ 0-100 (ต่ำกว่า 60 = ไม่แน่ใจ, 60-84 = ค่อนข้างแน่ใจ, 85-100 = แน่ใจมาก)",
+				Description: "ความมั่นใจ 0-100 (ต่ำกว่า 60 = ไม่แน่ใจ, 60-94 = ค่อนข้างแน่ใจ, 95-100 = แน่ใจมาก)",
 			},
 			"reasoning": {
 				Type:        genai.TypeString,
@@ -1097,16 +1097,16 @@ func ProcessMultiImageAccountingAnalysis(downloadedImages interface{}, fullResul
 	defer client.Close()
 
 	// 🤖 Conditional Model Selection for Phase 3 (Smart Cost Optimization)
-	// Template-only mode (≥85% confidence): Flash-Lite = เร็ว + ประหยัด (~฿0.08-0.10)
-	// Full analysis mode (<85% confidence): Flash = ช้ากว่า + แพงกว่า + ฉลาดกว่า (~฿0.30-0.35)
+	// Template-only mode (≥95% confidence): Flash-Lite = เร็ว + ประหยัด (~฿0.08-0.10)
+	// Full analysis mode (<95% confidence): Flash = ช้ากว่า + แพงกว่า + ฉลาดกว่า (~฿0.30-0.35)
 	var selectedModelName string
 	var modeDesc string
 	if mode == TemplateOnlyMode {
 		selectedModelName = configs.TEMPLATE_ACCOUNTING_MODEL_NAME
-		modeDesc = "Template-only (≥85%)"
+		modeDesc = "Template-only (≥95%)"
 	} else {
 		selectedModelName = configs.ACCOUNTING_MODEL_NAME
-		modeDesc = "Full analysis (<85%)"
+		modeDesc = "Full analysis (<95%)"
 	}
 	reqCtx.LogInfo("🤖 AI Model: %s [%s] → Cost-optimized selection", selectedModelName, modeDesc)
 

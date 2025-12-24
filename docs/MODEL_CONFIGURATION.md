@@ -270,7 +270,7 @@ ACCOUNTING_OUTPUT_PRICE_PER_MILLION=0.40
 - 💰 ประหยัด ~70% ใน Phase 3
 - ❌ Accounting reasoning ลดลง
 - ❌ Double-entry validation อาจผิดพลาดบ้าง
-- ✅ ใช้ได้กับ template-only mode (confidence ≥ 85%)
+- ✅ ใช้ได้กับ template-only mode (confidence ≥ 95%)
 
 ### 4. Upgrade Path
 

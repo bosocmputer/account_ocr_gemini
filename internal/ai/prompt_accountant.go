@@ -165,8 +165,8 @@ RULE #5 - VAT HANDLING:
 
 RULE #6 - CREDITOR/DEBTOR MATCHING:
 Use Fuzzy Matching (≥70% similarity) for Thai names:
-- "บริษัท ซีแอนด์ฮิลล์" ≈ "ซีแอนด์ฮิล" (95% match) ✅
-- "หจก.นิธิบุญ" ≈ "ห้างหุ้นส่วนจำกัด นิธิบุญ" (90% match) ✅
+- "[ชื่อบริษัทที่มีตัวสะกดต่าง]" ≈ "[ชื่อเดียวกันแต่สะกดต่าง]" (95%% match) ✅
+- "[ย่อ][ชื่อบริษัท]" ≈ "[เต็ม] [ชื่อบริษัท]" (90%% match) ✅
 - Match by keywords, not business type
 - If no match found → Use "Unknown Vendor" or "Unknown Customer"
 
@@ -184,7 +184,7 @@ Provide DETAILED explanations (2-3 sentences each, in Thai):
   * Referencing evidence from the document (receipt number, vendor name, item/service type, date, amount)
   * Explaining the accounting principle (expense/revenue/asset/liability)
   * Stating if it comes from template or your analysis from chart of accounts
-  * Example: "จากใบเสร็จเลขที่ T12510-01135 เป็นการซื้อน้ำมันดีเซล 62.13 ลิตร จำนวน 2,000 บาท จากบริษัท ศรีทองโชตนา ซึ่งเป็นค่าใช้จ่ายในการดำเนินงาน จึงเลือกบัญชี 531220 (ค่าน้ำมัน-ค่าแก๊สรถยนต์) ตาม Template ที่กำหนดไว้"
+  * Example: "จากใบเสร็จเลขที่ [xxx] เป็นการซื้อ[สินค้า/บริการ] [รายละเอียด] จำนวน [จำนวนเงิน] บาท จาก[ชื่อผู้ขาย] ซึ่งเป็นค่าใช้จ่ายในการดำเนินงาน จึงเลือกบัญชี [รหัสบัญชี] ([ชื่อบัญชี]) ตาม Template ที่กำหนดไว้"
 
 - side_reason: Explain WHY you put it on Debit/Credit side by:
   * Explaining the impact on financial statements (asset/liability/equity/revenue/expense increases or decreases)

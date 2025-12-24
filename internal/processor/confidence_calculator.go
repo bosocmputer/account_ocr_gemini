@@ -323,7 +323,7 @@ func generateBreakdown(
 	breakdown := make(map[string]string)
 
 	// Template Match
-	if factors.TemplateMatch >= 85 {
+	if factors.TemplateMatch >= 95 {
 		breakdown["template_match"] = "Template match สำเร็จ (คะแนนสูง)"
 	} else if factors.TemplateMatch > 0 {
 		breakdown["template_match"] = "Template match ไม่แน่นอน (คะแนนปานกลาง)"
