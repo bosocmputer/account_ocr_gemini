@@ -110,7 +110,6 @@ func formatMasterData(accounts []bson.M, journalBooks []bson.M, creditors []bson
 	templatesSection := ""
 	if len(documentTemplates) > 0 {
 		templatesSection = FormatTemplatesSection(documentTemplates) +
-			GetTemplateMatchingAlgorithm() +
 			GetTemplateStrictModeRules() +
 			GetAmountRecordingRules() +
 			GetNoTemplateMatchRules() +

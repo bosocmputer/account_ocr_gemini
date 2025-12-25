@@ -34,9 +34,12 @@ type TemplateMatchResult struct {
 
 // aiTemplateMatchResult represents AI's template matching result (internal)
 type aiTemplateMatchResult struct {
-	MatchedTemplate string `json:"matched_template"`
-	Confidence      int    `json:"confidence"`
-	Reasoning       string `json:"reasoning"`
+	MatchedTemplate       string `json:"matched_template"`
+	Confidence            int    `json:"confidence"`
+	Reasoning             string `json:"reasoning"`
+	CompanyNameInTemplate string `json:"company_name_in_template"` // ชื่อบริษัทที่ระบุใน template (ถ้ามี)
+	CompanyLocationInDoc  string `json:"company_location_in_doc"`  // ตำแหน่งที่พบชื่อบริษัทในเอกสาร: "document_header", "received_from", "customer_name", "not_found"
+	IsCompanyIssuer       bool   `json:"is_company_issuer"`        // true = บริษัทเป็นผู้ออกเอกสาร, false = บริษัทเป็นลูกค้า/ผู้จ่าย
 }
 
 // AnalyzeTemplateMatch วิเคราะห์ raw_document_text และหา template ที่เหมาะสม
@@ -114,6 +117,53 @@ func AnalyzeTemplateMatch(
 	if tokenUsage != nil {
 		reqCtx.LogInfo("🪙 Template Matching Tokens: %d input + %d output = %d total",
 			tokenUsage.InputTokens, tokenUsage.OutputTokens, tokenUsage.TotalTokens)
+	}
+
+	// 🚨 CRITICAL VALIDATION: Check company location
+	// If template specifies a company name, it MUST be the document issuer, not customer/payer
+	if aiResult.CompanyNameInTemplate != "" {
+		reqCtx.LogInfo("🔍 Validating company location: '%s' found in '%s'",
+			aiResult.CompanyNameInTemplate, aiResult.CompanyLocationInDoc)
+
+		// Validate location
+		validLocations := []string{"document_header", "issuer", "from"}
+		invalidLocations := []string{"received_from", "customer_name", "customer", "bill_to", "payer", "buyer"}
+
+		isValid := false
+		for _, validLoc := range validLocations {
+			if strings.Contains(strings.ToLower(aiResult.CompanyLocationInDoc), validLoc) {
+				isValid = true
+				break
+			}
+		}
+
+		// Check if in invalid location
+		for _, invalidLoc := range invalidLocations {
+			if strings.Contains(strings.ToLower(aiResult.CompanyLocationInDoc), invalidLoc) {
+				reqCtx.LogInfo("❌ REJECTED: Company '%s' found in WRONG position '%s' (should be issuer, not customer/payer)",
+					aiResult.CompanyNameInTemplate, aiResult.CompanyLocationInDoc)
+				return TemplateMatchResult{
+					Confidence: 0,
+					Reason: fmt.Sprintf("Company '%s' is customer/payer (in '%s'), not document issuer",
+						aiResult.CompanyNameInTemplate, aiResult.CompanyLocationInDoc),
+				}
+			}
+		}
+
+		// Also check is_company_issuer flag
+		if !aiResult.IsCompanyIssuer {
+			reqCtx.LogInfo("❌ REJECTED: AI marked company as NOT issuer (is_company_issuer=false)")
+			return TemplateMatchResult{
+				Confidence: 0,
+				Reason: fmt.Sprintf("Company '%s' is not document issuer according to AI analysis",
+					aiResult.CompanyNameInTemplate),
+			}
+		}
+
+		if !isValid {
+			reqCtx.LogInfo("⚠️  WARNING: Company location '%s' is ambiguous, relying on is_company_issuer flag",
+				aiResult.CompanyLocationInDoc)
+		}
 	}
 
 	// Find the matched template from map
@@ -630,16 +680,65 @@ func getTemplateMatchingPromptLocal(documentText string, templateDescriptions []
   * รายวันรับ (IV) = เรารับเงิน = เราขาย
   * รายวันจ่าย (PV) = เราจ่ายเงิน = เราซื้อ
 
-**ขั้นตอนที่ 3: เปรียบเทียบและตัดสินใจ**
+**ขั้นตอนที่ 3: 🚨 CRITICAL - ตรวจสอบตำแหน่งชื่อบริษัท (ถ้า template ระบุชื่อบริษัท)**
+
+⚠️ กฎสำคัญที่สุด: ถ้า Template Description มีชื่อบริษัท/ร้าน/หน่วยงานเฉพาะเจาะจง:
+
+1. ระบุชื่อบริษัทที่อยู่ใน template → บันทึกใน company_name_in_template
+
+2. หาตำแหน่งที่พบชื่อบริษัทในเอกสาร → บันทึกใน company_location_in_doc:
+   - "document_header" = อยู่หัวเอกสาร/บรรทัดแรก
+   - "received_from" = อยู่ในช่อง "ได้รับเงินจาก" (สำหรับใบเสร็จรับเงิน)
+   - "customer_name" = อยู่ในช่อง "ชื่อลูกค้า", "NAME", "CUSTOMER"
+   - "bill_to" = อยู่ใน "BILL TO", "SHIP TO"
+   - "not_found" = ไม่พบชื่อบริษัทในเอกสาร
+
+3. ตัดสินใจว่าบริษัทเป็นผู้ออกหรือไม่ → บันทึกใน is_company_issuer:
+   - true = บริษัทเป็นผู้ออกเอกสาร (หัวเอกสาร, ผู้รับเงิน, ผู้ขาย)
+   - false = บริษัทเป็นลูกค้า/ผู้จ่าย/ผู้ซื้อ
+
+🚨 เงื่อนไขบังคับ:
+- ถ้า company_location_in_doc = "received_from" → ต้องให้ is_company_issuer = false
+- ถ้า company_location_in_doc = "customer_name" → ต้องให้ is_company_issuer = false
+- ถ้า company_location_in_doc = "document_header" → ต้องให้ is_company_issuer = true
+- ถ้า is_company_issuer = false → ต้องให้ confidence = 0 (ห้ามใช้ template นี้!)
+
+📌 ตัวอย่างสำคัญ (ใบเสร็จรับเงิน):
+
+เอกสาร:
+  เทศบาลตำบลหนองป่าครั่ง (หัวเอกสาร)
+  ใบเสร็จรับเงิน
+  ได้รับเงินจาก: บริษัท นพรัตน์กู๊ดไทร์ (ผู้จ่ายเงิน!)
+
+Template: "ใบเสร็จรับเงิน ชื่อหัวบิล คือ บริษัท นพรัตน์กู๊ดไทร์"
+
+✅ การตอบที่ถูกต้อง (JSON):
+{
+  "matched_template": "ใบเสร็จรับเงิน ชื่อหัวบิล คือ บริษัท นพรัตน์กู๊ดไทร์",
+  "confidence": 0,
+  "reasoning": "บริษัท นพรัตน์ปรากฏในช่อง 'ได้รับเงินจาก' (เป็นผู้จ่ายเงิน) ไม่ใช่ผู้ออกเอกสาร",
+  "company_name_in_template": "บริษัท นพรัตน์กู๊ดไทร์",
+  "company_location_in_doc": "received_from",
+  "is_company_issuer": false
+}
+
+❌ การตอบที่ผิด (JSON):
+{
+  "confidence": 100,
+  "is_company_issuer": true
+}
+
+
+**ขั้นตอนที่ 4: เปรียบเทียบและตัดสินใจ**
 
 ✅ ตรงกับ template เมื่อ:
    - เอกสารและ template เป็นประเภทเดียวกัน
-   - ถ้า template ระบุชื่อบริษัท → บริษัทนั้นต้องเป็นผู้ออกเอกสารจริงๆ (ไม่ใช่ลูกค้า)
+   - ถ้า template ระบุชื่อบริษัท → is_company_issuer = true
    - ถ้า template ระบุสินค้า/บริการ → ต้องตรงกับที่ระบุ
    - ทิศทางธุรกรรมสอดคล้องกัน (ขาย/ซื้อ)
 
 ❌ ไม่ตรง template เมื่อ:
-   - บริษัทที่ระบุใน template เป็นเพียง "ลูกค้า" ในเอกสาร (ไม่ใช่ผู้ออก)
+   - บริษัทที่ระบุใน template เป็นเพียง "ลูกค้า" ในเอกสาร (is_company_issuer = false)
    - ประเภทสินค้า/บริการไม่ตรงกัน
    - ทิศทางธุรกรรมตรงข้าม
 
@@ -670,8 +769,11 @@ Additional context ให้ข้อมูลเพิ่มเติม ใช
 
 ให้ตอบเป็น JSON format:
 - matched_template: ชื่อ template ที่ตรงที่สุด (string)
-- confidence: ความมั่นใจ 0-100 (integer)
+- confidence: ความมั่นใจ 0-100 (integer) - **ต้องเป็น 0 ถ้า is_company_issuer = false**
 - reasoning: เหตุผลที่เลือก template นี้ (string, สั้นๆ ภาษาไทย)
+- company_name_in_template: ชื่อบริษัทที่ระบุใน template (string) - ถ้าไม่มีให้ใส่ ""
+- company_location_in_doc: ตำแหน่งที่พบชื่อบริษัทในเอกสาร (string) - "document_header", "received_from", "customer_name", "bill_to", "not_found"
+- is_company_issuer: บริษัทเป็นผู้ออกเอกสารหรือไม่ (boolean) - true = ผู้ออก, false = ลูกค้า/ผู้จ่าย
 `
 
 	return prompt
@@ -688,14 +790,26 @@ func createTemplateMatchSchemaLocal() *genai.Schema {
 			},
 			"confidence": {
 				Type:        genai.TypeInteger,
-				Description: "ความมั่นใจ 0-100 (ต่ำกว่า 60 = ไม่แน่ใจ, 60-94 = ค่อนข้างแน่ใจ, 95-100 = แน่ใจมาก)",
+				Description: "ความมั่นใจ 0-100 (ต้องเป็น 0 ถ้า is_company_issuer = false, ต่ำกว่า 60 = ไม่แน่ใจ, 60-94 = ค่อนข้างแน่ใจ, 95-100 = แน่ใจมาก)",
 			},
 			"reasoning": {
 				Type:        genai.TypeString,
 				Description: "เหตุผลที่เลือก template นี้ (สั้นๆ ภาษาไทย)",
 			},
+			"company_name_in_template": {
+				Type:        genai.TypeString,
+				Description: "ชื่อบริษัทที่ระบุใน template description (ถ้าไม่มีให้ใส่ \"\")",
+			},
+			"company_location_in_doc": {
+				Type:        genai.TypeString,
+				Description: "ตำแหน่งที่พบชื่อบริษัทในเอกสาร: document_header, received_from, customer_name, bill_to, not_found",
+			},
+			"is_company_issuer": {
+				Type:        genai.TypeBoolean,
+				Description: "บริษัทเป็นผู้ออกเอกสารหรือไม่ (true = ผู้ออก/ผู้รับเงิน, false = ลูกค้า/ผู้จ่ายเงิน) - ถ้า false ต้องให้ confidence = 0",
+			},
 		},
-		Required: []string{"matched_template", "confidence", "reasoning"},
+		Required: []string{"matched_template", "confidence", "reasoning", "company_name_in_template", "company_location_in_doc", "is_company_issuer"},
 	}
 }
 
