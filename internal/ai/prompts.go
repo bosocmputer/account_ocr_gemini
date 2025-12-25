@@ -91,7 +91,7 @@ func formatTemplateOnly(matchedTemplate *bson.M, journalBooks []bson.M, creditor
 - ✅ มี Creditors/Debtors list - ให้จับคู่ชื่อผู้ขาย/ลูกค้า
 - ✅ มี Journal Books list - ให้เลือกสมุดที่เหมาะสม
 - ถ้าต้องการ Chart of Accounts เต็ม → ระบุ template_used = false (AI จะ retry พร้อม full master data)
-`, businessContext, string(templateJSON), GetTemplateStrictModeRules(), GetTemplateAmountDistributionRules(), vendorMatchingGuidance, journalBooksSection, creditorsSection, debtorsSection)
+`, businessContext, string(templateJSON), GetTemplateAmountDistributionRules(), vendorMatchingGuidance, journalBooksSection, creditorsSection, debtorsSection)
 }
 
 // journalBooksSection, creditorsSection, debtorsSection are defined above
@@ -110,9 +110,7 @@ func formatMasterData(accounts []bson.M, journalBooks []bson.M, creditors []bson
 	templatesSection := ""
 	if len(documentTemplates) > 0 {
 		templatesSection = FormatTemplatesSection(documentTemplates) +
-			GetTemplateStrictModeRules() +
 			GetAmountRecordingRules() +
-			GetNoTemplateMatchRules() +
 			FormatFinalChecklist()
 
 	}
