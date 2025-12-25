@@ -1782,12 +1782,14 @@ func getStringFromInterface(val interface{}) string {
 func generateReviewRequirements(confidenceResult processor.ConfidenceResult, accountingEntry map[string]interface{}) map[string]interface{} {
 	if !confidenceResult.RequiresReview {
 		return map[string]interface{}{
-			"ต้องตรวจสอบ":    false,
-			"สามารถบันทึก":   true,
-			"ระดับความสำคัญ": "ไม่มี",
-			"สถานะ":          "✅ ผ่านการตรวจสอบ - พร้อมบันทึกบัญชี",
-			"รายการตรวจสอบ":  []string{},
-			"คำแนะนำ":        "ข้อมูลครบถ้วนและถูกต้อง สามารถบันทึกบัญชีได้เลย",
+			"requires_review": false,
+			"can_save":        true,
+			"priority":        "none",
+			"status":          "passed",
+			"message":         "ข้อมูลครบถ้วนและถูกต้อง สามารถบันทึกบัญชีได้เลย",
+			"issues":          []map[string]interface{}{},
+			"missing_fields":  []string{},
+			"recommendations": []string{},
 		}
 	}
 
@@ -1802,11 +1804,11 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 	// ตรวจสอบแต่ละปัจจัย
 	if factors.TemplateMatch < 80 {
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"หัวข้อ":      "🎯 เทมเพลต",
-			"คะแนน":       factors.TemplateMatch,
-			"สถานะ":       getStatusEmoji(factors.TemplateMatch),
-			"ปัญหา":       "เอกสารอาจไม่ตรงกับเทมเพลตที่เลือก",
-			"ต้องตรวจสอบ": "ตรวจสอบว่าเลือกเทมเพลตถูกต้องหรือไม่",
+			"category":    "template",
+			"score":       factors.TemplateMatch,
+			"status":      getStatusLevel(factors.TemplateMatch),
+			"issue":       "เอกสารอาจไม่ตรงกับเทมเพลตที่เลือก",
+			"action":      "ตรวจสอบว่าเลือกเทมเพลตถูกต้องหรือไม่",
 		})
 		recommendations = append(recommendations, "ตรวจสอบการเลือกเทมเพลต - อาจต้องสร้างเทมเพลตใหม่หรือปรับปรุงเทมเพลตที่มี")
 	}
@@ -1814,58 +1816,136 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 	if factors.PartyMatch < 80 {
 		debtorCode := getStringFromInterface(accountingEntry["debtor_code"])
 		creditorCode := getStringFromInterface(accountingEntry["creditor_code"])
+		debtorName := getStringFromInterface(accountingEntry["debtor_name"])
+		creditorName := getStringFromInterface(accountingEntry["creditor_name"])
 
 		party := "คู่ค้า"
-		if debtorCode != "" {
-			party = "ลูกค้า (AR)"
-		} else if creditorCode != "" {
-			party = "เจ้าหนี้ (AP)"
+		problemDetail := "ไม่พบข้อมูลคู่ค้าในระบบหรือชื่อไม่ตรงกัน"
+		actionRequired := "ตรวจสอบข้อมูลคู่ค้า"
+
+		// กำหนดประเภทคู่ค้า
+		if debtorCode != "" || debtorName != "" {
+			party = "ลูกค้า (Debtor)"
+		} else if creditorCode != "" || creditorName != "" {
+			party = "เจ้าหนี้ (Creditor)"
+		}
+
+		// กรณีมีชื่อแต่ไม่มีรหัส = ไม่พบใน Master Data
+		if (debtorCode == "" || debtorCode == "null") && debtorName != "" && debtorName != "null" {
+			problemDetail = fmt.Sprintf("ไม่พบลูกค้า '%s' ใน Master Data", debtorName)
+			actionRequired = fmt.Sprintf("เพิ่มข้อมูลลูกค้า '%s' เข้าสู่ระบบ Master Data", debtorName)
+			missingFields = append(missingFields, fmt.Sprintf("ลูกค้า '%s' ไม่มีในระบบ Master Data", debtorName))
+			recommendations = append(recommendations, fmt.Sprintf("⚠️ เพิ่มลูกค้า '%s' (หากเป็นลูกค้าประจำ) หรือใช้รหัส 'ลูกค้าทั่วไป' (หากเป็นลูกค้าชั่วคราว)", debtorName))
+		} else if (creditorCode == "" || creditorCode == "null") && creditorName != "" && creditorName != "null" {
+			problemDetail = fmt.Sprintf("ไม่พบเจ้าหนี้ '%s' ใน Master Data", creditorName)
+			actionRequired = fmt.Sprintf("เพิ่มข้อมูลเจ้าหนี้ '%s' เข้าสู่ระบบ Master Data", creditorName)
+			missingFields = append(missingFields, fmt.Sprintf("เจ้าหนี้ '%s' ไม่มีในระบบ Master Data", creditorName))
+			recommendations = append(recommendations, fmt.Sprintf("⚠️ เพิ่มเจ้าหนี้ '%s' เข้าสู่ระบบ Master Data ก่อนบันทึกบัญชี", creditorName))
+		} else if debtorCode == "" && creditorCode == "" && debtorName == "" && creditorName == "" {
+			// ไม่มีข้อมูลคู่ค้าเลย
+			problemDetail = "ไม่มีข้อมูลลูกค้าหรือเจ้าหนี้"
+			actionRequired = "ระบุข้อมูลลูกค้าหรือเจ้าหนี้"
+			missingFields = append(missingFields, "ข้อมูลลูกค้า (debtor) หรือเจ้าหนี้ (creditor)")
+			recommendations = append(recommendations, "⚠️ เพิ่มข้อมูลลูกค้าหรือเจ้าหนี้ลงในเอกสาร")
+		} else {
+			// มีรหัสแต่ไม่ตรงกัน 100%
+			actionRequired = "ตรวจสอบชื่อให้ตรงกับข้อมูลในระบบ"
+			recommendations = append(recommendations, "⚠️ ตรวจสอบชื่อให้ตรงกับข้อมูลในระบบ หรืออัปเดตข้อมูลในระบบให้ตรงกับเอกสาร")
 		}
 
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"หัวข้อ":      "👥 " + party,
-			"คะแนน":       factors.PartyMatch,
-			"สถานะ":       getStatusEmoji(factors.PartyMatch),
-			"ปัญหา":       "ไม่พบข้อมูล" + party + "ในระบบหรือชื่อไม่ตรงกัน",
-			"ต้องตรวจสอบ": "ตรวจสอบชื่อ" + party + "ว่าถูกต้องหรือไม่",
+			"category":    "party",
+			"party_type":  party,
+			"score":       factors.PartyMatch,
+			"status":      getStatusLevel(factors.PartyMatch),
+			"issue":       problemDetail,
+			"action":      actionRequired,
 		})
-
-		if debtorCode == "" && creditorCode == "" {
-			missingFields = append(missingFields, "รหัสลูกค้าหรือเจ้าหนี้")
-			recommendations = append(recommendations, "เพิ่มข้อมูลลูกค้าหรือเจ้าหนี้ลงในระบบ Master Data")
-		} else {
-			recommendations = append(recommendations, "ตรวจสอบชื่อให้ตรงกับข้อมูลในระบบ หรืออัปเดตข้อมูลในระบบให้ตรงกับเอกสาร")
-		}
 	}
 
 	if factors.DataCompleteness < 80 {
-		reviewItems = append(reviewItems, map[string]interface{}{
-			"หัวข้อ":      "📋 ข้อมูล",
-			"คะแนน":       factors.DataCompleteness,
-			"สถานะ":       getStatusEmoji(factors.DataCompleteness),
-			"ปัญหา":       "ข้อมูลไม่ครบถ้วน",
-			"ต้องตรวจสอบ": "เติมข้อมูลที่หายไปให้ครบถ้วน",
-		})
-
-		// ตรวจสอบฟิลด์ที่หายไป
+		// ตรวจสอบฟิลด์หลักที่จำเป็น
 		if accountingEntry["reference_number"] == nil || accountingEntry["reference_number"] == "" {
-			missingFields = append(missingFields, "เลขที่เอกสาร")
+			missingFields = append(missingFields, "เลขที่เอกสาร (reference_number)")
 		}
 		if accountingEntry["document_date"] == nil || accountingEntry["document_date"] == "" {
-			missingFields = append(missingFields, "วันที่")
+			missingFields = append(missingFields, "วันที่เอกสาร (document_date)")
 		}
-		if entries, ok := accountingEntry["entries"].([]interface{}); ok {
+		if accountingEntry["journal_book_code"] == nil || accountingEntry["journal_book_code"] == "" {
+			missingFields = append(missingFields, "รหัสสมุดรายวัน (journal_book_code)")
+		}
+
+		// ตรวจสอบว่ามี debtor หรือ creditor
+		debtorCode := getStringFromInterface(accountingEntry["debtor_code"])
+		debtorName := getStringFromInterface(accountingEntry["debtor_name"])
+		creditorCode := getStringFromInterface(accountingEntry["creditor_code"])
+		creditorName := getStringFromInterface(accountingEntry["creditor_name"])
+
+		hasDebtor := (debtorCode != "" && debtorCode != "null") || (debtorName != "" && debtorName != "null")
+		hasCreditor := (creditorCode != "" && creditorCode != "null") || (creditorName != "" && creditorName != "null")
+
+		if !hasDebtor && !hasCreditor {
+			missingFields = append(missingFields, "ข้อมูลลูกค้า (debtor) หรือเจ้าหนี้ (creditor)")
+		}
+
+		// ตรวจสอบรายการบัญชี (entries)
+		if entries, ok := accountingEntry["entries"].([]interface{}); ok && len(entries) > 0 {
 			for i, entry := range entries {
 				if entryMap, ok := entry.(map[string]interface{}); ok {
+					entryIssues := []string{}
+
+					// เช็ค account_code
+					if entryMap["account_code"] == nil || entryMap["account_code"] == "" {
+						entryIssues = append(entryIssues, "รหัสบัญชี")
+					}
+
+					// เช็ค description
 					if entryMap["description"] == nil || entryMap["description"] == "" {
-						missingFields = append(missingFields, fmt.Sprintf("รายละเอียดรายการที่ %d", i+1))
+						entryIssues = append(entryIssues, "รายละเอียด")
+					}
+
+					// เช็ค selection_reason
+					if entryMap["selection_reason"] == nil || entryMap["selection_reason"] == "" {
+						entryIssues = append(entryIssues, "เหตุผลในการเลือกบัญชี")
+					}
+
+					// เช็ค side_reason
+					if entryMap["side_reason"] == nil || entryMap["side_reason"] == "" {
+						entryIssues = append(entryIssues, "เหตุผลในการบันทึกฝั่ง DR/CR")
+					}
+
+					if len(entryIssues) > 0 {
+						missingFields = append(missingFields,
+							fmt.Sprintf("รายการที่ %d: %s", i+1, strings.Join(entryIssues, ", ")))
 					}
 				}
 			}
+		} else {
+			missingFields = append(missingFields, "รายการบัญชี (entries)")
 		}
 
+		// สร้างข้อความปัญหาที่ชัดเจน
+		problemText := "ข้อมูลไม่ครบถ้วน"
+		actionText := "เติมข้อมูลที่หายไปให้ครบถ้วน"
+
 		if len(missingFields) > 0 {
-			recommendations = append(recommendations, fmt.Sprintf("เติมข้อมูลที่หายไป: %s", strings.Join(missingFields, ", ")))
+			problemText = fmt.Sprintf("ขาดข้อมูล %d รายการ", len(missingFields))
+			actionText = fmt.Sprintf("เติมข้อมูลที่ขาดหายไป: %s", strings.Join(missingFields, " | "))
+		}
+
+		reviewItems = append(reviewItems, map[string]interface{}{
+			"category":    "data_completeness",
+			"score":       factors.DataCompleteness,
+			"status":      getStatusLevel(factors.DataCompleteness),
+			"issue":       problemText,
+			"action":      actionText,
+		})
+
+		// คำแนะนำที่ชัดเจน
+		if len(missingFields) > 0 {
+			for _, field := range missingFields {
+				recommendations = append(recommendations, "⚠️ "+field)
+			}
 		} else {
 			recommendations = append(recommendations, "ตรวจสอบความครบถ้วนของข้อมูลในแต่ละรายการ")
 		}
@@ -1873,81 +1953,78 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 
 	if factors.FieldValidation < 80 {
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"หัวข้อ":      "✏️ รูปแบบ",
-			"คะแนน":       factors.FieldValidation,
-			"สถานะ":       getStatusEmoji(factors.FieldValidation),
-			"ปัญหา":       "รูปแบบข้อมูลบางส่วนไม่ถูกต้อง",
-			"ต้องตรวจสอบ": "ตรวจสอบรูปแบบวันที่, ตัวเลข, รหัสบัญชี",
+			"category":    "field_validation",
+			"score":       factors.FieldValidation,
+			"status":      getStatusLevel(factors.FieldValidation),
+			"issue":       "รูปแบบข้อมูลบางส่วนไม่ถูกต้อง",
+			"action":      "ตรวจสอบรูปแบบวันที่, ตัวเลข, รหัสบัญชี",
 		})
 		recommendations = append(recommendations, "ตรวจสอบรูปแบบข้อมูล เช่น วันที่ต้องเป็น YYYY-MM-DD, ตัวเลขต้องเป็นตัวเลขเท่านั้น")
 	}
 
 	if factors.BalanceValidation < 80 {
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"หัวข้อ":      "💰 ยอดเงิน",
-			"คะแนน":       factors.BalanceValidation,
-			"สถานะ":       getStatusEmoji(factors.BalanceValidation),
-			"ปัญหา":       "⚠️ ยอด Debit ไม่เท่ากับ Credit",
-			"ต้องตรวจสอบ": "ตรวจสอบการคำนวณยอดเงินให้ถูกต้อง",
+			"category":    "balance",
+			"score":       factors.BalanceValidation,
+			"status":      getStatusLevel(factors.BalanceValidation),
+			"issue":       "ยอด Debit ไม่เท่ากับ Credit",
+			"action":      "ตรวจสอบการคำนวณยอดเงินให้ถูกต้อง",
 		})
-		recommendations = append(recommendations, "⚠️ ยอดไม่สมดุล - ต้องแก้ไขก่อนบันทึกบัญชี")
+		recommendations = append(recommendations, "ยอดไม่สมดุล - ต้องแก้ไขก่อนบันทึกบัญชี")
 	}
 
 	// กำหนดระดับความสำคัญ
-	priority := "ต่ำ"
-	priorityEmoji := "🟢"
-	statusMessage := "⚠️ ควรตรวจสอบก่อนบันทึก"
+	priority := "low"
+	statusCode := "should_review"
 	canProceed := score >= 70
 
 	if score < 70 {
-		priority = "สูง"
-		priorityEmoji = "🔴"
-		statusMessage = "🛑 ต้องแก้ไขก่อนบันทึก"
+		priority = "high"
+		statusCode = "must_fix"
 		canProceed = false
 	} else if score < 85 && (factors.DataCompleteness < 70 || factors.FieldValidation < 70 || factors.BalanceValidation < 80) {
-		priority = "กลาง"
-		priorityEmoji = "🟡"
-		statusMessage = "⚠️ แนะนำให้ตรวจสอบก่อนบันทึก"
+		priority = "medium"
+		statusCode = "recommended_review"
 	}
 
 	// สรุปคำแนะนำ
 	mainRecommendation := "ตรวจสอบรายการที่มีปัญหาด้านล่าง"
 	if !canProceed {
 		mainRecommendation = "ต้องแก้ไขปัญหาทั้งหมดก่อนจึงจะบันทึกบัญชีได้"
-	} else if priority == "ต่ำ" {
+	} else if priority == "low" {
 		mainRecommendation = "สามารถบันทึกบัญชีได้ แต่แนะนำให้ตรวจสอบข้อมูลก่อน"
 	}
 
 	return map[string]interface{}{
-		"ต้องตรวจสอบ":    true,
-		"สามารถบันทึก":   canProceed,
-		"ระดับความสำคัญ": fmt.Sprintf("%s %s", priorityEmoji, priority),
-		"สถานะ":          statusMessage,
-		"คะแนนรวม":       fmt.Sprintf("%.0f/100", score),
-		"รายการตรวจสอบ":  reviewItems,
-		"ฟิลด์ที่หายไป":  missingFields,
-		"คำแนะนำ":        mainRecommendation,
-		"วิธีแก้ไข":      recommendations,
-		"สรุป": map[string]interface{}{
-			"จำนวนปัญหา":   len(reviewItems),
-			"ปัญหาร้ายแรง": countCriticalIssues(confidenceResult),
-			"ควรตรวจสอบ":   len(reviewItems) - countCriticalIssues(confidenceResult),
+		"requires_review": true,
+		"can_save":        canProceed,
+		"priority":        priority,
+		"status":          statusCode,
+		"score":           score,
+		"message":         mainRecommendation,
+		"issues":          reviewItems,
+		"missing_fields":  missingFields,
+		"recommendations": recommendations,
+		"summary": map[string]interface{}{
+			"total_issues":    len(reviewItems),
+			"critical_issues": countCriticalIssues(confidenceResult),
+			"minor_issues":    len(reviewItems) - countCriticalIssues(confidenceResult),
 		},
 	}
 }
 
-// getStatusEmoji คืนค่า emoji ตามคะแนน
-func getStatusEmoji(score float64) string {
+// getStatusLevel คืนค่าระดับสถานะตามคะแนน
+func getStatusLevel(score float64) string {
 	if score >= 90 {
-		return "✅ ดีมาก"
+		return "excellent"
 	} else if score >= 80 {
-		return "✓ ดี"
+		return "good"
 	} else if score >= 70 {
-		return "⚠️ พอใช้"
+		return "fair"
 	} else if score >= 60 {
-		return "⚠️ ต่ำ"
+		return "poor"
 	}
-	return "❌ ต่ำมาก"
+	return "very_poor"
 }
 
 // countCriticalIssues นับจำนวนปัญหาร้ายแรง

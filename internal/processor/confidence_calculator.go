@@ -157,23 +157,53 @@ func calculateCompletenessScore(accountingEntry map[string]interface{}) float64 
 		return 0.0
 	}
 
-	// ฟิลด์หลักที่ต้องมี (ไม่นับ debtor เพราะอาจเป็นผู้ซื้อทั่วไป)
-	requiredFields := []string{
-		"creditor_code", "creditor_name",
-		"document_date", "reference_number",
+	// ฟิลด์หลักที่ต้องมีเสมอ
+	alwaysRequiredFields := []string{
+		"document_date",
+		"reference_number",
 		"journal_book_code",
 	}
 
 	filledCount := 0
-	for _, field := range requiredFields {
+	totalRequired := len(alwaysRequiredFields)
+
+	// เช็คฟิลด์ที่ต้องมีเสมอ
+	for _, field := range alwaysRequiredFields {
 		value, exists := accountingEntry[field]
 		if exists && value != nil && value != "" {
 			filledCount++
 		}
 	}
 
+	// เช็คว่าต้องมี debtor OR creditor อย่างน้อย 1 อย่าง (ไม่ใช่ทั้งคู่)
+	totalRequired++ // เพิ่ม 1 สำหรับ debtor/creditor check
+	hasParty := false
+
+	// เช็ค debtor
+	debtorCode, debtorExists := accountingEntry["debtor_code"]
+	debtorName, debtorNameExists := accountingEntry["debtor_name"]
+	if (debtorExists && debtorCode != nil && debtorCode != "") ||
+		(debtorNameExists && debtorName != nil && debtorName != "") {
+		hasParty = true
+	}
+
+	// เช็ค creditor (ถ้าไม่มี debtor)
+	if !hasParty {
+		creditorCode, creditorExists := accountingEntry["creditor_code"]
+		creditorName, creditorNameExists := accountingEntry["creditor_name"]
+		if (creditorExists && creditorCode != nil && creditorCode != "") ||
+			(creditorNameExists && creditorName != nil && creditorName != "") {
+			hasParty = true
+		}
+	}
+
+	// ถ้ามี debtor หรือ creditor ให้คะแนน
+	if hasParty {
+		filledCount++
+	}
+
 	// คำนวณเปอร์เซ็นต์ความสมบูรณ์
-	score := (float64(filledCount) / float64(len(requiredFields))) * 100
+	score := (float64(filledCount) / float64(totalRequired)) * 100
 	return math.Round(score*10) / 10
 }
 
