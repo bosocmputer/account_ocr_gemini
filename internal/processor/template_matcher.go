@@ -29,7 +29,8 @@ type TemplateMatchResult struct {
 	MatchedKeywords []string
 	Description     string
 	TemplateID      interface{}
-	Reason          string // เหตุผลที่เลือก template นี้
+	Reason          string             // เหตุผลที่เลือก template นี้
+	TokenUsage      *common.TokenUsage // Token usage from AI call (Phase 2)
 }
 
 // aiTemplateMatchResult represents AI's template matching result (internal)
@@ -146,6 +147,7 @@ func AnalyzeTemplateMatch(
 					Confidence: 0,
 					Reason: fmt.Sprintf("Company '%s' is customer/payer (in '%s'), not document issuer",
 						aiResult.CompanyNameInTemplate, aiResult.CompanyLocationInDoc),
+					TokenUsage: tokenUsage, // 🔥 Include token usage even when rejected
 				}
 			}
 		}
@@ -157,6 +159,7 @@ func AnalyzeTemplateMatch(
 				Confidence: 0,
 				Reason: fmt.Sprintf("Company '%s' is not document issuer according to AI analysis",
 					aiResult.CompanyNameInTemplate),
+				TokenUsage: tokenUsage, // 🔥 Include token usage even when rejected
 			}
 		}
 
@@ -208,6 +211,7 @@ func AnalyzeTemplateMatch(
 			return TemplateMatchResult{
 				Confidence: 0,
 				Reason:     fmt.Sprintf("AI เลือก template '%s' ที่ไม่พบในระบบ (similarity: %.1f%%)", aiResult.MatchedTemplate, bestSimilarity*100),
+				TokenUsage: tokenUsage, // 🔥 Include token usage even when not found
 			}
 		}
 	}
@@ -227,6 +231,7 @@ func AnalyzeTemplateMatch(
 		Description:     originalDescription,
 		TemplateID:      matchedTemplate["_id"],
 		Reason:          aiResult.Reasoning,
+		TokenUsage:      tokenUsage, // 🔥 Include token usage
 	}
 
 	if bestMatch.Confidence > 0 {
@@ -623,11 +628,45 @@ func callGeminiForTemplateMatch(documentText string, templateDescriptions []stri
 	// Step 7: Extract token usage using Template-specific pricing (Phase 2)
 	var tokenUsage *common.TokenUsage
 	if resp.UsageMetadata != nil {
+		// 📊 DETAILED TOKEN BREAKDOWN (Phase 2 - Template Matching)
+		reqCtx.LogInfo("═══════════════════════════════════════════════════")
+		reqCtx.LogInfo("📊 PHASE 2 - TEMPLATE MATCHING TOKEN BREAKDOWN")
+		reqCtx.LogInfo("═══════════════════════════════════════════════════")
+		reqCtx.LogInfo("📝 Prompt Tokens: %d", resp.UsageMetadata.PromptTokenCount)
+
+		// Calculate input tokens including thought tokens (billed as input)
+		inputTokens := int(resp.UsageMetadata.PromptTokenCount)
+
+		if resp.UsageMetadata.CachedContentTokenCount > 0 {
+			inputTokens += int(resp.UsageMetadata.CachedContentTokenCount)
+			reqCtx.LogInfo("💾 Cached Tokens: %d (billed as input)", resp.UsageMetadata.CachedContentTokenCount)
+		}
+
+		// Check for thought tokens (Gemini 2.5 Flash thinking mode)
+		if resp.UsageMetadata.TotalTokenCount > (resp.UsageMetadata.PromptTokenCount + resp.UsageMetadata.CandidatesTokenCount) {
+			thoughtTokens := resp.UsageMetadata.TotalTokenCount - resp.UsageMetadata.PromptTokenCount - resp.UsageMetadata.CandidatesTokenCount
+			reqCtx.LogInfo("💭 Thought Tokens: %d (billed as input)", thoughtTokens)
+			inputTokens += int(thoughtTokens)
+		}
+
+		reqCtx.LogInfo("📤 Output Tokens: %d", resp.UsageMetadata.CandidatesTokenCount)
+		reqCtx.LogInfo("📊 Total Tokens: %d", resp.UsageMetadata.TotalTokenCount)
+
 		tokens := common.CalculateTemplateTokenCost(
-			int(resp.UsageMetadata.PromptTokenCount),
+			inputTokens,
 			int(resp.UsageMetadata.CandidatesTokenCount),
 		)
 		tokenUsage = &tokens
+
+		// 💰 COST BREAKDOWN
+		reqCtx.LogInfo("───────────────────────────────────────────────────")
+		reqCtx.LogInfo("💰 COST CALCULATION (Phase 2 - Template):")
+		reqCtx.LogInfo("   Model: %s", configs.TEMPLATE_MODEL_NAME)
+		reqCtx.LogInfo("   Input Cost:  %d tokens × $%.4f/1M = $%.6f", inputTokens, configs.TEMPLATE_INPUT_PRICE_PER_MILLION, float64(inputTokens)*configs.TEMPLATE_INPUT_PRICE_PER_MILLION/1_000_000)
+		reqCtx.LogInfo("   Output Cost: %d tokens × $%.4f/1M = $%.6f", resp.UsageMetadata.CandidatesTokenCount, configs.TEMPLATE_OUTPUT_PRICE_PER_MILLION, float64(resp.UsageMetadata.CandidatesTokenCount)*configs.TEMPLATE_OUTPUT_PRICE_PER_MILLION/1_000_000)
+		reqCtx.LogInfo("   Total USD: $%.6f", tokens.CostUSD)
+		reqCtx.LogInfo("   Total THB: ฿%.4f", tokens.CostTHB)
+		reqCtx.LogInfo("═══════════════════════════════════════════════════")
 	}
 
 	reqCtx.LogInfo("✅ AI Template Matching: '%s' (%d%%) - %s", result.MatchedTemplate, result.Confidence, result.Reasoning)

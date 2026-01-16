@@ -31,16 +31,18 @@ var (
 	TEMPLATE_CONFIDENCE_THRESHOLD float64 // Minimum confidence to use template-only mode (default: 95%)
 
 	// Gemini Pricing Configuration (hardcoded based on official Gemini API pricing)
-	// Gemini 2.5 Flash-Lite: $0.10 input, $0.40 output per 1M tokens
-	// Gemini 2.5 Flash: $0.30 input, $2.50 output per 1M tokens
-	OCR_INPUT_PRICE_PER_MILLION                  = 0.10
-	OCR_OUTPUT_PRICE_PER_MILLION                 = 0.40
-	TEMPLATE_INPUT_PRICE_PER_MILLION             = 0.10
-	TEMPLATE_OUTPUT_PRICE_PER_MILLION            = 0.40
-	TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION  = 0.10
-	TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION = 0.40
-	ACCOUNTING_INPUT_PRICE_PER_MILLION           = 0.30
-	ACCOUNTING_OUTPUT_PRICE_PER_MILLION          = 2.50
+	// Reference: https://ai.google.dev/pricing (Updated: January 2026 - PAID TIER)
+	// Gemini 2.5 Flash-Lite (Paid): $0.10 input, $0.40 output per 1M tokens
+	// Gemini 2.5 Flash (Paid): $0.30 input, $2.50 output per 1M tokens
+	// Note: Thinking tokens are billed as INPUT tokens
+	OCR_INPUT_PRICE_PER_MILLION                  = 0.10 // Flash-Lite pricing (Paid tier)
+	OCR_OUTPUT_PRICE_PER_MILLION                 = 0.40 // Flash-Lite pricing (Paid tier)
+	TEMPLATE_INPUT_PRICE_PER_MILLION             = 0.10 // Flash-Lite pricing (Paid tier)
+	TEMPLATE_OUTPUT_PRICE_PER_MILLION            = 0.40 // Flash-Lite pricing (Paid tier)
+	TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION  = 0.10 // Flash-Lite pricing (when template matched ≥95%)
+	TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION = 0.40 // Flash-Lite pricing (when template matched ≥95%)
+	ACCOUNTING_INPUT_PRICE_PER_MILLION           = 0.30 // Flash pricing (when template not matched <95%)
+	ACCOUNTING_OUTPUT_PRICE_PER_MILLION          = 2.50 // Flash pricing INCLUDING THINKING TOKENS
 
 	USD_TO_THB float64 // Exchange rate from .env
 

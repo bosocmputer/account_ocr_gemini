@@ -732,7 +732,8 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 			configs.TEMPLATE_CONFIDENCE_THRESHOLD)
 	}
 
-	reqCtx.EndStep("success", nil, nil)
+	// 🔥 Track template matching token usage
+	reqCtx.EndStep("success", templateMatchResult.TokenUsage, nil)
 
 	// Step 5: Prepare master data (already validated and loaded at the beginning)
 	reqCtx.StartStep("prepare_master_data")
@@ -1804,11 +1805,11 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 	// ตรวจสอบแต่ละปัจจัย
 	if factors.TemplateMatch < 80 {
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"category":    "template",
-			"score":       factors.TemplateMatch,
-			"status":      getStatusLevel(factors.TemplateMatch),
-			"issue":       "เอกสารอาจไม่ตรงกับเทมเพลตที่เลือก",
-			"action":      "ตรวจสอบว่าเลือกเทมเพลตถูกต้องหรือไม่",
+			"category": "template",
+			"score":    factors.TemplateMatch,
+			"status":   getStatusLevel(factors.TemplateMatch),
+			"issue":    "เอกสารอาจไม่ตรงกับเทมเพลตที่เลือก",
+			"action":   "ตรวจสอบว่าเลือกเทมเพลตถูกต้องหรือไม่",
 		})
 		recommendations = append(recommendations, "ตรวจสอบการเลือกเทมเพลต - อาจต้องสร้างเทมเพลตใหม่หรือปรับปรุงเทมเพลตที่มี")
 	}
@@ -1854,12 +1855,12 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 		}
 
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"category":    "party",
-			"party_type":  party,
-			"score":       factors.PartyMatch,
-			"status":      getStatusLevel(factors.PartyMatch),
-			"issue":       problemDetail,
-			"action":      actionRequired,
+			"category":   "party",
+			"party_type": party,
+			"score":      factors.PartyMatch,
+			"status":     getStatusLevel(factors.PartyMatch),
+			"issue":      problemDetail,
+			"action":     actionRequired,
 		})
 	}
 
@@ -1934,11 +1935,11 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 		}
 
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"category":    "data_completeness",
-			"score":       factors.DataCompleteness,
-			"status":      getStatusLevel(factors.DataCompleteness),
-			"issue":       problemText,
-			"action":      actionText,
+			"category": "data_completeness",
+			"score":    factors.DataCompleteness,
+			"status":   getStatusLevel(factors.DataCompleteness),
+			"issue":    problemText,
+			"action":   actionText,
 		})
 
 		// คำแนะนำที่ชัดเจน
@@ -1953,22 +1954,22 @@ func generateReviewRequirements(confidenceResult processor.ConfidenceResult, acc
 
 	if factors.FieldValidation < 80 {
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"category":    "field_validation",
-			"score":       factors.FieldValidation,
-			"status":      getStatusLevel(factors.FieldValidation),
-			"issue":       "รูปแบบข้อมูลบางส่วนไม่ถูกต้อง",
-			"action":      "ตรวจสอบรูปแบบวันที่, ตัวเลข, รหัสบัญชี",
+			"category": "field_validation",
+			"score":    factors.FieldValidation,
+			"status":   getStatusLevel(factors.FieldValidation),
+			"issue":    "รูปแบบข้อมูลบางส่วนไม่ถูกต้อง",
+			"action":   "ตรวจสอบรูปแบบวันที่, ตัวเลข, รหัสบัญชี",
 		})
 		recommendations = append(recommendations, "ตรวจสอบรูปแบบข้อมูล เช่น วันที่ต้องเป็น YYYY-MM-DD, ตัวเลขต้องเป็นตัวเลขเท่านั้น")
 	}
 
 	if factors.BalanceValidation < 80 {
 		reviewItems = append(reviewItems, map[string]interface{}{
-			"category":    "balance",
-			"score":       factors.BalanceValidation,
-			"status":      getStatusLevel(factors.BalanceValidation),
-			"issue":       "ยอด Debit ไม่เท่ากับ Credit",
-			"action":      "ตรวจสอบการคำนวณยอดเงินให้ถูกต้อง",
+			"category": "balance",
+			"score":    factors.BalanceValidation,
+			"status":   getStatusLevel(factors.BalanceValidation),
+			"issue":    "ยอด Debit ไม่เท่ากับ Credit",
+			"action":   "ตรวจสอบการคำนวณยอดเงินให้ถูกต้อง",
 		})
 		recommendations = append(recommendations, "ยอดไม่สมดุล - ต้องแก้ไขก่อนบันทึกบัญชี")
 	}

@@ -131,7 +131,7 @@ func (rc *RequestContext) EndStep(status string, tokens *TokenUsage, err error) 
 			logMsg += fmt.Sprintf(" | ขั้นย่อย: %d", len(rc.CurrentSubSteps))
 		}
 
-		log.Printf(logMsg)
+		log.Printf("%s", logMsg)
 	}
 
 	rc.Steps = append(rc.Steps, stepLog)
@@ -225,10 +225,27 @@ func CalculateAccountingTokenCost(inputTokens, outputTokens int) TokenUsage {
 func (rc *RequestContext) GetSummary() map[string]interface{} {
 	totalDuration := time.Since(rc.StartTime).Milliseconds()
 
-	// Build step breakdown
+	// Build step breakdown with token/cost details
 	stepBreakdown := make(map[string]int64)
+	phaseDetails := make([]map[string]interface{}, 0)
+	apiCallCount := 0
+
 	for _, step := range rc.Steps {
 		stepBreakdown[step.Name] = step.Duration
+
+		// Count API calls and collect phase details
+		if step.Tokens != nil {
+			apiCallCount++
+			phaseDetails = append(phaseDetails, map[string]interface{}{
+				"phase":         step.Name,
+				"duration_sec":  float64(step.Duration) / 1000,
+				"input_tokens":  step.Tokens.InputTokens,
+				"output_tokens": step.Tokens.OutputTokens,
+				"total_tokens":  step.Tokens.TotalTokens,
+				"cost_usd":      step.Tokens.CostUSD,
+				"cost_thb":      step.Tokens.CostTHB,
+			})
+		}
 	}
 
 	summary := map[string]interface{}{
@@ -238,6 +255,8 @@ func (rc *RequestContext) GetSummary() map[string]interface{} {
 		"total_duration_sec": float64(totalDuration) / 1000,
 		"step_breakdown":     stepBreakdown,
 		"total_steps":        len(rc.Steps),
+		"api_calls":          apiCallCount,
+		"phase_details":      phaseDetails,
 		"token_usage": map[string]interface{}{
 			"input_tokens":  rc.TotalTokens.InputTokens,
 			"output_tokens": rc.TotalTokens.OutputTokens,
@@ -247,17 +266,60 @@ func (rc *RequestContext) GetSummary() map[string]interface{} {
 		},
 	}
 
-	log.Printf("[%s] \n═══ 🎯 สรุปผล ═══")
-	log.Printf("[%s] ⏱️  เวลารวม: %.2fวินาที | 📝 ขั้นตอน: %d | 🪙 Tokens: %s | 💰 ค่าใช้จ่าย: ฿%.2f",
+	// Enhanced logging with phase breakdown
+	log.Printf("[%s] ", rc.RequestID)
+	log.Printf("[%s] ═══════════════════════════════════════════════════", rc.RequestID)
+	log.Printf("[%s] 🎯 สรุปผลการประมวลผล", rc.RequestID)
+	log.Printf("[%s] ═══════════════════════════════════════════════════", rc.RequestID)
+	log.Printf("[%s] 📊 จำนวน API Calls: %d ครั้ง", rc.RequestID, apiCallCount)
+	log.Printf("[%s] ", rc.RequestID)
+
+	// Log each phase detail
+	for i, phase := range phaseDetails {
+		log.Printf("[%s] 🔹 รอบที่ %d: %s", rc.RequestID, i+1, phase["phase"])
+		log.Printf("[%s]    ├─ Tokens: %d input + %d output = %d total",
+			rc.RequestID,
+			phase["input_tokens"],
+			phase["output_tokens"],
+			phase["total_tokens"])
+		log.Printf("[%s]    └─ Cost: $%.6f USD (฿%.4f THB)",
+			rc.RequestID,
+			phase["cost_usd"],
+			phase["cost_thb"])
+	}
+
+	log.Printf("[%s] ", rc.RequestID)
+	log.Printf("[%s] ───────────────────────────────────────────────────", rc.RequestID)
+	log.Printf("[%s] 💰 สรุปค่าใช้จ่ายรวม:", rc.RequestID)
+	log.Printf("[%s]    ├─ Total Input Tokens:  %s", rc.RequestID, formatNumber(rc.TotalTokens.InputTokens))
+	log.Printf("[%s]    ├─ Total Output Tokens: %s", rc.RequestID, formatNumber(rc.TotalTokens.OutputTokens))
+	log.Printf("[%s]    ├─ Total Tokens: %s", rc.RequestID, formatNumber(rc.TotalTokens.TotalTokens))
+	log.Printf("[%s]    ├─ Total Cost USD: $%.6f", rc.RequestID, rc.TotalTokens.CostUSD)
+	log.Printf("[%s]    └─ Total Cost THB: ฿%.4f", rc.RequestID, rc.TotalTokens.CostTHB)
+	log.Printf("[%s] ", rc.RequestID)
+	log.Printf("[%s] 💳 Google Cloud Billing - ค่าใช้จ่ายที่ต้องจ่ายจริง:", rc.RequestID)
+	log.Printf("[%s]    ├─ Gemini API (console.cloud.google.com/billing)", rc.RequestID)
+	log.Printf("[%s]    ├─ Input:  %s tokens × $%.4f/1M = $%.6f USD",
 		rc.RequestID,
-		float64(totalDuration)/1000,
-		len(rc.Steps),
-		fmt.Sprintf("%sเข้า + %sออก = %sรวม",
-			formatNumber(rc.TotalTokens.InputTokens),
-			formatNumber(rc.TotalTokens.OutputTokens),
-			formatNumber(rc.TotalTokens.TotalTokens)),
-		rc.TotalTokens.CostTHB)
-	log.Printf("[%s] ═══════════════════════════\n", rc.RequestID)
+		formatNumber(rc.TotalTokens.InputTokens),
+		getAverageInputPrice(phaseDetails),
+		calculateInputCost(phaseDetails))
+	log.Printf("[%s]    ├─ Output: %s tokens × $%.4f/1M = $%.6f USD",
+		rc.RequestID,
+		formatNumber(rc.TotalTokens.OutputTokens),
+		getAverageOutputPrice(phaseDetails),
+		calculateOutputCost(phaseDetails))
+	log.Printf("[%s]    ├─ Subtotal USD: $%.6f (รวม Input + Output)", rc.RequestID, rc.TotalTokens.CostUSD)
+	log.Printf("[%s]    └─ Subtotal THB: ฿%.4f (อัตราแลกเปลี่ยน 1 USD = %.2f THB)",
+		rc.RequestID, rc.TotalTokens.CostTHB, configs.USD_TO_THB)
+	log.Printf("[%s] ", rc.RequestID)
+	log.Printf("[%s] 📌 หมายเหตุ:", rc.RequestID)
+	log.Printf("[%s]    • Mistral OCR = เหมาจ่าย (ไม่คิดตาม tokens)", rc.RequestID)
+	log.Printf("[%s]    • Gemini ทุก Phase = จ่ายตามจริง (ตรงกับ Google Billing)", rc.RequestID)
+	log.Printf("[%s]    • Thinking tokens = นับรวมใน Input tokens", rc.RequestID)
+	log.Printf("[%s] ═══════════════════════════════════════════════════", rc.RequestID)
+	log.Printf("[%s] ⏱️  เวลารวมทั้งหมด: %.2f วินาที", rc.RequestID, float64(totalDuration)/1000)
+	log.Printf("[%s] ═══════════════════════════════════════════════════", rc.RequestID)
 
 	return summary
 }
@@ -357,4 +419,96 @@ func formatNumber(n int) string {
 		return fmt.Sprintf("%d,%03d", n/1000, n%1000)
 	}
 	return fmt.Sprintf("%d,%03d,%03d", n/1000000, (n%1000000)/1000, n%1000)
+}
+
+// Helper functions for detailed cost calculation
+
+// getAverageInputPrice calculates weighted average input token price across all phases
+func getAverageInputPrice(phaseDetails []map[string]interface{}) float64 {
+	if len(phaseDetails) == 0 {
+		return 0
+	}
+
+	totalInputTokens := 0
+	totalInputCost := 0.0
+
+	for _, phase := range phaseDetails {
+		inputTokens := phase["input_tokens"].(int)
+		costUSD := phase["cost_usd"].(float64)
+
+		totalInputTokens += inputTokens
+		// Calculate input portion of cost (proportional to input tokens)
+		outputTokens := phase["output_tokens"].(int)
+		if inputTokens+outputTokens > 0 {
+			inputRatio := float64(inputTokens) / float64(inputTokens+outputTokens)
+			totalInputCost += costUSD * inputRatio
+		}
+	}
+
+	if totalInputTokens == 0 {
+		return 0
+	}
+
+	return (totalInputCost / float64(totalInputTokens)) * 1_000_000 // Convert to per 1M
+}
+
+// getAverageOutputPrice calculates weighted average output token price across all phases
+func getAverageOutputPrice(phaseDetails []map[string]interface{}) float64 {
+	if len(phaseDetails) == 0 {
+		return 0
+	}
+
+	totalOutputTokens := 0
+	totalOutputCost := 0.0
+
+	for _, phase := range phaseDetails {
+		outputTokens := phase["output_tokens"].(int)
+		costUSD := phase["cost_usd"].(float64)
+
+		totalOutputTokens += outputTokens
+		// Calculate output portion of cost
+		inputTokens := phase["input_tokens"].(int)
+		if inputTokens+outputTokens > 0 {
+			outputRatio := float64(outputTokens) / float64(inputTokens+outputTokens)
+			totalOutputCost += costUSD * outputRatio
+		}
+	}
+
+	if totalOutputTokens == 0 {
+		return 0
+	}
+
+	return (totalOutputCost / float64(totalOutputTokens)) * 1_000_000 // Convert to per 1M
+}
+
+// calculateInputCost calculates total input cost from phase details
+func calculateInputCost(phaseDetails []map[string]interface{}) float64 {
+	totalCost := 0.0
+	for _, phase := range phaseDetails {
+		inputTokens := phase["input_tokens"].(int)
+		costUSD := phase["cost_usd"].(float64)
+		outputTokens := phase["output_tokens"].(int)
+
+		if inputTokens+outputTokens > 0 {
+			inputRatio := float64(inputTokens) / float64(inputTokens+outputTokens)
+			totalCost += costUSD * inputRatio
+		}
+	}
+	return totalCost
+}
+
+// calculateOutputCost calculates total output cost from phase details
+func calculateOutputCost(phaseDetails []map[string]interface{}) float64 {
+	totalCost := 0.0
+	for _, phase := range phaseDetails {
+		outputTokens := phase["output_tokens"].(int)
+		costUSD := phase["cost_usd"].(float64)
+		inputTokens := phase["input_tokens"].(int)
+
+		if inputTokens+outputTokens > 0 {
+			outputRatio := float64(outputTokens) / float64(inputTokens+outputTokens)
+			totalCost += costUSD * outputRatio
+		}
+	}
+	return totalCost
 }
