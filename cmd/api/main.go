@@ -66,9 +66,13 @@ func main() {
 		})
 	})
 
-	// Step 3: Define the API routes
-	router.POST("/api/v1/analyze-receipt", api.AnalyzeReceiptHandler)
-	router.POST("/api/v1/test-template", api.TestTemplateHandler)
+	// Step 3: Define the API routes, grouped under /billscan so this service
+	// can share a Caddy box with other apps via a plain reverse_proxy (no
+	// path stripping needed on the Caddy side) — routes are identical
+	// whether hit directly on :8080 locally or through Caddy in production.
+	billscan := router.Group("/billscan")
+	billscan.POST("/api/v1/analyze-receipt", api.AnalyzeReceiptHandler)
+	billscan.POST("/api/v1/test-template", api.TestTemplateHandler)
 
 	// Step 4: Setup HTTP server with timeouts
 	srv := &http.Server{
@@ -83,8 +87,8 @@ func main() {
 	go func() {
 		log.Printf("Starting server on :%s", configs.PORT)
 		log.Println("API Endpoints:")
-		log.Println("  POST /api/v1/analyze-receipt")
-		log.Println("  POST /api/v1/test-template")
+		log.Println("  POST /billscan/api/v1/analyze-receipt")
+		log.Println("  POST /billscan/api/v1/test-template")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
