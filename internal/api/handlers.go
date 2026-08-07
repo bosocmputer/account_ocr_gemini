@@ -3,7 +3,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,7 +21,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // --- Image Quality Validation Constants ---
@@ -164,36 +162,6 @@ func ValidateDoubleEntry(entries []JournalEntry) (bool, float64, float64) {
 	const tolerance = 0.01
 	balanced := (totalDebit-totalCredit) >= -tolerance && (totalDebit-totalCredit) <= tolerance
 	return balanced, totalDebit, totalCredit
-}
-
-// FetchDocumentFormate retrieves accounting templates from documentFormate collection
-// Returns only templates that have details (not empty templates)
-func FetchDocumentFormate(shopID string) ([]bson.M, error) {
-	collection := storage.GetMongoDB().Collection("documentFormate")
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	// Query by shopid and filter out empty templates
-	filter := bson.M{
-		"shopid":  shopID,
-		"details": bson.M{"$exists": true, "$ne": []interface{}{}},
-	}
-
-	cursor, err := collection.Find(ctx, filter)
-	if err != nil {
-		if err == mongo.ErrNoDocuments {
-			return []bson.M{}, nil // No templates found is OK
-		}
-		return nil, fmt.Errorf("failed to query documentFormate: %w", err)
-	}
-	defer cursor.Close(ctx)
-
-	var templates []bson.M
-	if err = cursor.All(ctx, &templates); err != nil {
-		return nil, fmt.Errorf("failed to decode documentFormate: %w", err)
-	}
-
-	return templates, nil
 }
 
 // Helper functions for custom prompts extraction
@@ -450,14 +418,10 @@ func SubmitAnalyzeReceiptHandler(c *gin.Context) {
 	reqCtx.LogInfo("✓ Master data validated: %d accounts, %d journal books, %d creditors, %d debtors",
 		len(masterCache.Accounts), len(masterCache.JournalBooks), len(masterCache.Creditors), len(masterCache.Debtors))
 
-	// ⚡ FETCH DOCUMENT FORMATE TEMPLATES (accounting patterns)
-	// This provides AI with predefined accounting entry templates for consistency
-	documentTemplates, err := FetchDocumentFormate(req.ShopID)
-	if err != nil {
-		reqCtx.LogWarning("Failed to fetch documentFormate templates: %v", err)
-		// Continue without templates - AI will work without them
-		documentTemplates = []bson.M{}
-	}
+	// Document templates now come from masterCache (5-min TTL cache, same as
+	// accounts/journal books/creditors/debtors) instead of a fresh Mongo
+	// query on every request — see storage.GetDocumentFormate.
+	documentTemplates := masterCache.DocumentTemplates
 	reqCtx.LogInfo("✓ Document templates loaded: %d templates found", len(documentTemplates))
 
 	// Everything validated and loaded synchronously above — from here on,
@@ -465,7 +429,14 @@ func SubmitAnalyzeReceiptHandler(c *gin.Context) {
 	// stores the exact same response shape this handler used to write
 	// directly via c.JSON(200, ...); job.Fail() stores the same error shapes
 	// that used to be written via c.JSON(4xx/5xx, ...).
-	job, token := jobs.Create(reqCtx)
+	job, token, err := jobs.Create(reqCtx)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "too_many_active_jobs",
+			"message": "ระบบกำลังประมวลผลงานจำนวนมาก กรุณาลองใหม่อีกครั้งในอีกสักครู่",
+		})
+		return
+	}
 
 	go runAnalyzePipeline(job, req, debugMode, masterCache, documentTemplates)
 
@@ -621,11 +592,19 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 	resultsChan := make(chan PureOCRImageResult, len(downloadedImages))
 	jobsChan := make(chan ocrJob, len(downloadedImages))
 
-	// Start worker goroutines
-	// Changed to sequential processing (1 worker) to prevent 429 Rate Limit errors
-	// Gemini Free Tier: 15 RPM = must wait ~4 seconds between requests
-	// Parallel processing (3 workers) causes burst traffic → 429 errors
-	numWorkers := 1 // Sequential processing - safe for Tier 1 (15 RPM limit)
+	// Start worker goroutines. The Gemini rate limiter (internal/ratelimit)
+	// already caps total API request rate process-wide, independent of how
+	// many of these workers run concurrently — so this only controls how
+	// many images' network+inference latency can overlap within a single
+	// request, not how fast Gemini calls actually go out. Configurable via
+	// OCR_WORKER_COUNT (default 3); never spawn more workers than images.
+	numWorkers := configs.OCR_WORKER_COUNT
+	if numWorkers > len(downloadedImages) {
+		numWorkers = len(downloadedImages)
+	}
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 
 	// Create OCR provider based on request model (gemini or mistral)
 	ocrProvider, err := ai.CreateOCRProvider(req.Model)
@@ -1479,7 +1458,15 @@ func SubmitTestTemplateHandler(c *gin.Context) {
 
 	reqCtx.LogInfo("✅ File saved temporarily: %s (%.2f KB)", tempFilename, float64(header.Size)/1024)
 
-	job, token := jobs.Create(reqCtx)
+	job, token, err := jobs.Create(reqCtx)
+	if err != nil {
+		os.Remove(tempFilePath) // job never got a chance to run, so nothing else will clean this up
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error":   "too_many_active_jobs",
+			"message": "ระบบกำลังประมวลผลงานจำนวนมาก กรุณาลองใหม่อีกครั้งในอีกสักครู่",
+		})
+		return
+	}
 	go runTestTemplatePipeline(job, shopID, model, template, tempFilePath, tempFilename)
 
 	c.JSON(http.StatusAccepted, gin.H{

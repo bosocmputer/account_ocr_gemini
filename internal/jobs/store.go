@@ -4,6 +4,7 @@
 package jobs
 
 import (
+	"errors"
 	"sync"
 	"time"
 
@@ -27,6 +28,18 @@ const JobTTL = 30 * time.Minute
 
 // SweepInterval is how often the background sweeper checks for expired jobs.
 const SweepInterval = 5 * time.Minute
+
+// MaxStoredJobs bounds total memory even within the TTL window — under
+// heavy/bursty load (e.g. a user repeatedly hitting "ทดสอบ" while tuning a
+// template prompt) many jobs can complete inside a single 30-minute TTL
+// window, and each retains its full result until the next sweep. This is a
+// hard cap independent of time: Create() evicts the oldest COMPLETED/FAILED
+// job to make room when over capacity, and returns an error instead of
+// evicting a still-processing job (which would orphan an in-flight AI call —
+// wasted spend with no client left able to see the result).
+const MaxStoredJobs = 500
+
+var ErrTooManyActiveJobs = errors.New("too many jobs are currently processing, try again shortly")
 
 type Progress struct {
 	Percent int    `json:"percent"`
@@ -135,16 +148,57 @@ var (
 // Create registers a new job and returns it along with a plaintext token the
 // caller must return to the client exactly once — only its hash is retained,
 // mirroring readepdf's X-Job-Token ownership-proof pattern.
-func Create(reqCtx *common.RequestContext) (job *Job, token string) {
+//
+// Returns ErrTooManyActiveJobs if the store is at MaxStoredJobs and every
+// entry is still processing (nothing evictable without orphaning an
+// in-flight AI call) — this is the backpressure signal a caller should
+// surface as a 503/retry-later rather than accept the submission.
+func Create(reqCtx *common.RequestContext) (job *Job, token string, err error) {
 	token = uuid.New().String()
 	job = newJob(token, reqCtx)
 
 	storeMutex.Lock()
+	if len(store) >= MaxStoredJobs {
+		if !evictOldestFinishedLocked() {
+			storeMutex.Unlock()
+			return nil, "", ErrTooManyActiveJobs
+		}
+	}
 	store[job.ID] = job
 	storeMutex.Unlock()
 
 	startSweeper()
-	return job, token
+	return job, token, nil
+}
+
+// evictOldestFinishedLocked removes the oldest COMPLETED/FAILED job to free
+// a slot. Must be called with storeMutex already held. Returns false if
+// every stored job is still processing (nothing safe to evict).
+func evictOldestFinishedLocked() bool {
+	var oldestID string
+	var oldestUpdatedAt time.Time
+	found := false
+
+	for id, job := range store {
+		snap := job.Snapshot()
+		if snap.Status == StatusProcessing {
+			continue
+		}
+		job.mu.RLock()
+		updatedAt := job.updatedAt
+		job.mu.RUnlock()
+		if !found || updatedAt.Before(oldestUpdatedAt) {
+			oldestID = id
+			oldestUpdatedAt = updatedAt
+			found = true
+		}
+	}
+
+	if !found {
+		return false
+	}
+	delete(store, oldestID)
+	return true
 }
 
 // Get looks up a job by ID. Returns (nil, false) if not found OR if the

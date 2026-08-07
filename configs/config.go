@@ -67,6 +67,15 @@ var (
 	PARALLEL_PROCESSING bool // Enable parallel image processing
 	USE_SMALLER_MODEL   bool // Use smaller/faster model when speed is priority
 
+	// OCR_WORKER_COUNT: how many images within one analyze-receipt/test-template
+	// request are OCR'd concurrently. Actually wired in (internal/api/handlers.go's
+	// runAnalyzePipeline), unlike the performance settings above. Gemini's own
+	// per-request rate is separately capped by internal/ratelimit's global token
+	// bucket regardless of this value — this only controls how many images can be
+	// in flight (network+inference latency) at once within a single request, not
+	// how fast Gemini calls are submitted.
+	OCR_WORKER_COUNT int
+
 	// Confidence threshold settings for validation
 	CONFIDENCE_HIGH_THRESHOLD   = "high"   // AI is very confident
 	CONFIDENCE_MEDIUM_THRESHOLD = "medium" // AI has some uncertainty
@@ -132,6 +141,12 @@ func LoadConfig() {
 	ACCOUNTING_TIMEOUT = getEnvInt("ACCOUNTING_TIMEOUT", 60)      // 60 seconds
 	PARALLEL_PROCESSING = getEnvBool("PARALLEL_PROCESSING", true) // Enable parallel processing
 	USE_SMALLER_MODEL = getEnvBool("USE_SMALLER_MODEL", false)    // Use flash-8b for speed
+
+	// Default 3: lets a multi-image receipt overlap network+inference latency
+	// across images instead of paying it fully serially, while the global
+	// Gemini rate limiter (internal/ratelimit) still caps actual API request
+	// rate independent of this number — raising this doesn't risk more 429s.
+	OCR_WORKER_COUNT = getEnvInt("OCR_WORKER_COUNT", 3)
 
 	log.Println("✓ Configuration loaded successfully")
 }

@@ -176,6 +176,39 @@ func GetJournalBooks(shopID string, additionalFilter bson.M) ([]bson.M, error) {
 	return results, nil
 }
 
+// GetDocumentFormate retrieves accounting templates from the documentFormate
+// collection, filtered by shopid, excluding templates with no details (an
+// empty template has nothing for the AI to match against). Moved here from
+// internal/api/handlers.go's old FetchDocumentFormate so it can be folded
+// into MasterDataCache's TTL cache alongside the other master-data queries —
+// previously this hit Mongo fresh on every single analyze-receipt/
+// test-template request, unlike everything else in MasterDataCache.
+func GetDocumentFormate(shopID string) ([]bson.M, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{
+		"shopid":  shopID,
+		"details": bson.M{"$exists": true, "$ne": []interface{}{}},
+	}
+
+	cursor, err := mongoDB.Collection("documentFormate").Find(ctx, filter)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return []bson.M{}, nil // No templates found is OK
+		}
+		return nil, fmt.Errorf("failed to query documentFormate: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var templates []bson.M
+	if err = cursor.All(ctx, &templates); err != nil {
+		return nil, fmt.Errorf("failed to decode documentFormate: %w", err)
+	}
+
+	return templates, nil
+}
+
 // GetCreditors retrieves creditors from MongoDB filtered by shopid
 func GetCreditors(shopID string, additionalFilter bson.M) ([]bson.M, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

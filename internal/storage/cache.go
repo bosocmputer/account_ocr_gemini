@@ -11,14 +11,15 @@ import (
 
 // MasterDataCache stores frequently accessed master data
 type MasterDataCache struct {
-	Accounts     []bson.M
-	JournalBooks []bson.M
-	Creditors    []bson.M
-	Debtors      []bson.M     // เพิ่มลูกหนี้
-	ShopProfile  *ShopProfile // เพิ่มข้อมูลบริษัท
-	LoadedAt     time.Time
-	ShopID       string
-	mu           sync.RWMutex
+	Accounts          []bson.M
+	JournalBooks      []bson.M
+	Creditors         []bson.M
+	Debtors           []bson.M     // เพิ่มลูกหนี้
+	ShopProfile       *ShopProfile // เพิ่มข้อมูลบริษัท
+	DocumentTemplates []bson.M     // accounting templates (documentFormate collection)
+	LoadedAt          time.Time
+	ShopID            string
+	mu                sync.RWMutex
 }
 
 // Global cache map: shopID -> cache
@@ -74,15 +75,21 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 		return nil, err
 	}
 
+	documentTemplates, err := GetDocumentFormate(shopID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Create new cache
 	newCache := &MasterDataCache{
-		Accounts:     accounts,
-		JournalBooks: journalBooks,
-		Creditors:    creditors,
-		Debtors:      debtors,
-		ShopProfile:  shopProfile,
-		LoadedAt:     time.Now(),
-		ShopID:       shopID,
+		Accounts:          accounts,
+		JournalBooks:      journalBooks,
+		Creditors:         creditors,
+		Debtors:           debtors,
+		ShopProfile:       shopProfile,
+		DocumentTemplates: documentTemplates,
+		LoadedAt:          time.Now(),
+		ShopID:            shopID,
 	}
 
 	masterDataCacheMap[shopID] = newCache
