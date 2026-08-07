@@ -42,7 +42,12 @@ func main() {
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", configs.ALLOWED_ORIGINS)
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		// X-Job-Token: the async job-polling endpoints (GetJobStatusHandler)
+		// require this header to prove ownership of a job — without it in
+		// the preflight allow-list, browsers silently block the polling
+		// request before it's ever sent (curl doesn't enforce CORS at all,
+		// so this gap only shows up as a browser-side "network error").
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Job-Token")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 
 		if c.Request.Method == "OPTIONS" {
@@ -70,16 +75,33 @@ func main() {
 	// can share a Caddy box with other apps via a plain reverse_proxy (no
 	// path stripping needed on the Caddy side) — routes are identical
 	// whether hit directly on :8080 locally or through Caddy in production.
+	//
+	// Both analyze-receipt and test-template are async: each submits a job
+	// and returns immediately (202 + job id/token), and the client polls the
+	// shared jobs/:id endpoint for progress and the final result — see
+	// internal/jobs and Submit*Handler's doc comments for why (the pipeline
+	// can legitimately run 1-3+ minutes, which no longer needs to hold an
+	// HTTP request open the whole time; test-template is the tool used to
+	// iteratively tune a template's prompt, so real progress feedback there
+	// matters just as much as the main analyze flow).
 	billscan := router.Group("/billscan")
-	billscan.POST("/api/v1/analyze-receipt", api.AnalyzeReceiptHandler)
-	billscan.POST("/api/v1/test-template", api.TestTemplateHandler)
+	billscan.POST("/api/v1/analyze-receipt", api.SubmitAnalyzeReceiptHandler)
+	billscan.POST("/api/v1/test-template", api.SubmitTestTemplateHandler)
+	billscan.GET("/api/v1/jobs/:id", api.GetJobStatusHandler)
 
-	// Step 4: Setup HTTP server with timeouts
+	// Step 4: Setup HTTP server with timeouts.
+	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute
+	// budget (internal/api/handlers.go's runAnalyzePipeline) — the longest
+	// live HTTP request now is just the initial submit or a status poll,
+	// both fast. This also fixes a pre-existing mismatch where WriteTimeout
+	// (3m) was shorter than the pipeline's own timeout (5m), which meant the
+	// server could kill the connection before the pipeline's own graceful
+	// timeout response ever had a chance to be written.
 	srv := &http.Server{
 		Addr:           ":" + configs.PORT,
 		Handler:        router,
-		ReadTimeout:    3 * time.Second,
-		WriteTimeout:   3 * time.Minute, // Allow up to 3 minutes for AI processing
+		ReadTimeout:    30 * time.Second, // was 3s — too tight for test-template's multipart file upload
+		WriteTimeout:   30 * time.Second,
 		MaxHeaderBytes: 1 << 20,
 	}
 
@@ -87,8 +109,9 @@ func main() {
 	go func() {
 		log.Printf("Starting server on :%s", configs.PORT)
 		log.Println("API Endpoints:")
-		log.Println("  POST /billscan/api/v1/analyze-receipt")
-		log.Println("  POST /billscan/api/v1/test-template")
+		log.Println("  POST /billscan/api/v1/analyze-receipt (async — returns a job id)")
+		log.Println("  POST /billscan/api/v1/test-template (async — returns a job id)")
+		log.Println("  GET  /billscan/api/v1/jobs/:id (poll progress/result)")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)

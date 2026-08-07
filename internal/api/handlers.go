@@ -16,6 +16,7 @@ import (
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/bosocmputer/account_ocr_gemini/internal/ai"
 	"github.com/bosocmputer/account_ocr_gemini/internal/common"
+	"github.com/bosocmputer/account_ocr_gemini/internal/jobs"
 	"github.com/bosocmputer/account_ocr_gemini/internal/processor"
 	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/gin-gonic/gin"
@@ -320,11 +321,33 @@ func downloadImageFromURL(imageURL, filename string) (string, error) {
 	return fileExt, nil
 }
 
-// --- New Analyze Receipt Handler (Phase 1 Complete Flow) ---
+// --- New Analyze Receipt Handler (Phase 1 Complete Flow, async job) ---
 
-// AnalyzeReceiptHandler handles POST requests to /api/v1/analyze-receipt
-// It performs full OCR + accounting analysis with master data integration
-func AnalyzeReceiptHandler(c *gin.Context) {
+// ImageData is the plain-value shape passed into the background pipeline —
+// deliberately independent of gin.Context so runAnalyzePipeline never needs
+// to touch anything request-scoped.
+type ImageData struct {
+	Filename string
+	Index    int
+	GUID     string
+	URI      string
+}
+
+// PureOCRImageResult mirrors one image's OCR outcome — used both inside the
+// pipeline and by the debug-data assembly at the end.
+type PureOCRImageResult struct {
+	ImageIndex int
+	Result     *ai.SimpleOCRResult
+	Tokens     *common.TokenUsage
+	Error      error
+}
+
+// SubmitAnalyzeReceiptHandler handles POST requests to /api/v1/analyze-receipt.
+// It validates the request and required master data synchronously (so bad
+// input still gets a clean 400 immediately), then hands the expensive OCR +
+// accounting-analysis pipeline to a background goroutine and returns a job
+// id right away. Poll GetJobStatusHandler for progress and the final result.
+func SubmitAnalyzeReceiptHandler(c *gin.Context) {
 	// Step 1: Parse JSON request body
 	var req ExtractRequest
 	if err := c.BindJSON(&req); err != nil {
@@ -437,68 +460,97 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	}
 	reqCtx.LogInfo("✓ Document templates loaded: %d templates found", len(documentTemplates))
 
-	// Setup timeout context (5 minutes max for very complex receipts)
-	// Note: Complex receipts with many items can take 2-3 minutes
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
-	defer cancel()
+	// Everything validated and loaded synchronously above — from here on,
+	// the pipeline runs detached in a background goroutine. job.Complete()
+	// stores the exact same response shape this handler used to write
+	// directly via c.JSON(200, ...); job.Fail() stores the same error shapes
+	// that used to be written via c.JSON(4xx/5xx, ...).
+	job, token := jobs.Create(reqCtx)
 
-	// Channel to signal completion
-	done := make(chan bool, 1)
-	timeout := make(chan bool, 1)
+	go runAnalyzePipeline(job, req, debugMode, masterCache, documentTemplates)
 
-	// Monitor for timeout
-	go func() {
-		select {
-		case <-ctx.Done():
-			if ctx.Err() == context.DeadlineExceeded {
-				reqCtx.LogError("⚠️  Request timeout after 5 minutes - receipt too complex")
+	c.JSON(http.StatusAccepted, gin.H{
+		"status": "processing",
+		"job": gin.H{
+			"id":            job.ID,
+			"token":         token,
+			"progress":      job.Snapshot().Progress,
+			"poll_after_ms": 2000,
+		},
+	})
+}
 
-				// Send timeout response immediately
-				c.JSON(http.StatusRequestTimeout, gin.H{
-					"error":   "Processing timeout",
-					"message": "Receipt is too complex and processing exceeded 5 minutes. Please try with a clearer or simpler receipt image.",
-					"details": "This usually happens with very long receipts (50+ items) or low-quality images requiring extensive processing.",
-					"suggestions": []string{
-						"Try taking a clearer photo with better lighting",
-						"Ensure the receipt is flat and fully visible",
-						"Consider splitting very long receipts into sections",
-						"Check if the receipt has unusually complex layout",
-					},
-					"request_id": reqCtx.RequestID,
-					"processing_summary": map[string]interface{}{
-						"timeout_at":      "5 minutes",
-						"total_duration":  time.Since(reqCtx.StartTime).Seconds(),
-						"completed_steps": reqCtx.GetPartialSummary(),
-					},
-				})
+// GetJobStatusHandler handles GET requests to /api/v1/jobs/:id. While the
+// job is still processing it returns the same 202+progress envelope as the
+// submit endpoint; once finished it returns the exact response body the
+// synchronous handler used to send directly (200), or a structured error
+// (422/408) if the pipeline failed.
+func GetJobStatusHandler(c *gin.Context) {
+	id := c.Param("id")
+	token := c.GetHeader("X-Job-Token")
 
-				timeout <- true
-			}
-		case <-done:
-			return
+	job, ok := jobs.Get(id, token)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{
+			"error":   "job_not_found",
+			"message": "ไม่พบงานหรือสิทธิ์เข้าถึงหมดอายุ",
+		})
+		return
+	}
+
+	snap := job.Snapshot()
+
+	switch snap.Status {
+	case jobs.StatusCompleted:
+		c.JSON(http.StatusOK, snap.Result)
+	case jobs.StatusFailed:
+		status := http.StatusUnprocessableEntity
+		if snap.Error != nil && snap.Error.Code == "PROCESSING_TIMEOUT" {
+			status = http.StatusRequestTimeout
 		}
-	}()
+		c.JSON(status, gin.H{
+			"error":      snap.Error.Code,
+			"message":    snap.Error.Message,
+			"request_id": job.ID,
+		})
+	default:
+		c.JSON(http.StatusAccepted, gin.H{
+			"status": "processing",
+			"job": gin.H{
+				"id":            job.ID,
+				"state":         string(snap.Status),
+				"progress":      snap.Progress,
+				"poll_after_ms": 2000,
+			},
+		})
+	}
+}
+
+// runAnalyzePipeline runs the full OCR + accounting-analysis pipeline for
+// one job. It must never touch *gin.Context — every input it needs was
+// already extracted into plain Go values by SubmitAnalyzeReceiptHandler
+// before this was spawned. Every early-return that used to write an HTTP
+// error response now calls job.Fail(...) instead; the final success path
+// calls job.Complete(...) with the same response body shape as before.
+func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, masterCache *storage.MasterDataCache, documentTemplates []bson.M) {
+	reqCtx := job.ReqCtx
+
+	// 5 minutes max for very complex receipts — this is now a deadline
+	// checked from inside the goroutine itself, not an HTTP-server-level
+	// timeout, since no client connection is being held open anymore.
+	deadline := reqCtx.StartTime.Add(5 * time.Minute)
 
 	// Step 2: Download ALL images from Azure Blob Storage
+	job.UpdateProgress(5, "download", "กำลังดาวน์โหลดรูปภาพ")
 	reqCtx.StartStep("download_images")
 	reqCtx.LogInfo("Downloading %d image(s)", len(req.ImageReferences))
-
-	type ImageData struct {
-		Filename string
-		Index    int
-		GUID     string
-		URI      string
-	}
 
 	var downloadedImages []ImageData
 
 	for i, imgRef := range req.ImageReferences {
 		if imgRef.ImageURI == "" {
 			reqCtx.EndStep("failed", nil, fmt.Errorf("imageuri is required in imagereferences[%d]", i))
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error":      fmt.Sprintf("imageuri is required in imagereferences[%d]", i),
-				"request_id": reqCtx.RequestID,
-			})
+			job.Fail("invalid_request", fmt.Sprintf("imageuri is required in imagereferences[%d]", i))
 			return
 		}
 
@@ -510,13 +562,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		fileExt, err := downloadImageFromURL(imgRef.ImageURI, tempFilename)
 		if err != nil {
 			reqCtx.EndStep("failed", nil, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":       "Failed to download file from Azure Blob Storage",
-				"details":     err.Error(),
-				"image_uri":   imgRef.ImageURI,
-				"image_index": i,
-				"request_id":  reqCtx.RequestID,
-			})
+			job.Fail("download_failed", fmt.Sprintf("Failed to download file from Azure Blob Storage: %s", err.Error()))
 			return
 		}
 
@@ -525,11 +571,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		if err := os.Rename(tempFilename, finalFilename); err != nil {
 			os.Remove(tempFilename) // cleanup
 			reqCtx.EndStep("failed", nil, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":      "Failed to save downloaded file",
-				"details":    err.Error(),
-				"request_id": reqCtx.RequestID,
-			})
+			job.Fail("save_failed", fmt.Sprintf("Failed to save downloaded file: %s", err.Error()))
 			return
 		}
 
@@ -557,23 +599,14 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 
 	// Step 3: Process PURE OCR for ALL images (NEW OPTIMIZED VERSION)
 	// Changed from full structured extraction to raw text only - saves ~25,000 tokens per image!
+	job.UpdateProgress(10, "ocr", "กำลังอ่านข้อความจากเอกสาร")
 	reqCtx.StartStep("pure_ocr_extraction_all")
 	reqCtx.LogInfo("Pure OCR extraction (raw text only) for %d image(s)", len(downloadedImages))
 
-	// Check if we should continue (not timed out)
-	select {
-	case <-timeout:
+	if time.Now().After(deadline) {
 		reqCtx.EndStep("cancelled", nil, fmt.Errorf("timeout before pure OCR"))
+		job.Fail("PROCESSING_TIMEOUT", "Receipt is too complex and processing exceeded 5 minutes. Please try with a clearer or simpler receipt image.")
 		return
-	default:
-		// Continue
-	}
-
-	type PureOCRImageResult struct {
-		ImageIndex int
-		Result     *ai.SimpleOCRResult
-		Tokens     *common.TokenUsage
-		Error      error
 	}
 
 	var pureOCRResults []PureOCRImageResult
@@ -598,12 +631,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	ocrProvider, err := ai.CreateOCRProvider(req.Model)
 	if err != nil {
 		reqCtx.LogError("Failed to create OCR provider: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "OCR provider initialization failed",
-			"details":    err.Error(),
-			"model":      req.Model,
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("ocr_provider_init_failed", fmt.Sprintf("OCR provider initialization failed: %s", err.Error()))
 		return
 	}
 
@@ -698,6 +726,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	// Step 3.5: Template Matching Analysis (NEW SMART OPTIMIZATION)
 	// Analyze raw text to see if it matches any predefined accounting template
 	// If match found (≥TEMPLATE_CONFIDENCE_THRESHOLD) → Use template-only mode (saves another ~20,000 tokens in Phase 3!)
+	job.UpdateProgress(45, "template_match", "กำลังจับคู่รูปแบบบัญชี")
 	reqCtx.StartStep("template_matching_analysis")
 	reqCtx.LogInfo("Analyzing text to find matching accounting templates...")
 
@@ -736,6 +765,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	reqCtx.EndStep("success", templateMatchResult.TokenUsage, nil)
 
 	// Step 5: Prepare master data (already validated and loaded at the beginning)
+	job.UpdateProgress(55, "prepare_master_data", "กำลังเตรียมข้อมูลผังบัญชี")
 	reqCtx.StartStep("prepare_master_data")
 
 	// Filter accounts: Send only Level 3-5 (exclude Level 1-2 headers)
@@ -801,6 +831,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	reqCtx.EndStep("success", nil, nil)
 
 	// Step 5.5: Pre-match vendors using fuzzy matching (before sending to AI)
+	job.UpdateProgress(60, "vendor_match", "กำลังค้นหาคู่ค้า")
 	reqCtx.LogInfo("\n┌── vendor_pre_matching")
 	var suggestedVendorCode string
 	var suggestedVendorName string
@@ -853,16 +884,14 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	reqCtx.LogInfo("└── ✅ สำเร็จ")
 
 	// Step 6: Phase 3 - AI Multi-Image Accounting Analysis (with conditional master data loading)
+	job.UpdateProgress(65, "accounting_analysis", "กำลังวิเคราะห์รายการบัญชี")
 	reqCtx.StartStep("phase3_multi_image_accounting")
 	reqCtx.LogInfo("Analyzing relationships between %d image(s) - Mode: %s", len(pureOCRResults), masterDataMode)
 
-	// Check if we should continue (not timed out)
-	select {
-	case <-timeout:
+	if time.Now().After(deadline) {
 		reqCtx.EndStep("cancelled", &totalPureOCRTokens, fmt.Errorf("timeout before accounting analysis"))
+		job.Fail("PROCESSING_TIMEOUT", "Receipt is too complex and processing exceeded 5 minutes. Please try with a clearer or simpler receipt image.")
 		return
-	default:
-		// Continue
 	}
 
 	// Process multi-image accounting analysis with conditional master data
@@ -882,11 +911,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	)
 	if err != nil {
 		reqCtx.EndStep("failed", phase3Tokens, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "Accounting analysis failed",
-			"details":    err.Error(),
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("accounting_analysis_failed", fmt.Sprintf("Accounting analysis failed: %s", err.Error()))
 		return
 	}
 	reqCtx.EndStep("success", phase3Tokens, nil)
@@ -894,10 +919,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	// Parse accounting JSON
 	var accountingResponse map[string]interface{}
 	if err := json.Unmarshal([]byte(accountingJSON), &accountingResponse); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to parse accounting response",
-			"details": err.Error(),
-		})
+		job.Fail("parse_failed", fmt.Sprintf("Failed to parse accounting response: %s", err.Error()))
 		return
 	}
 
@@ -965,6 +987,7 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Step 7.6: Calculate weighted confidence score
+	job.UpdateProgress(85, "confidence", "กำลังตรวจสอบความถูกต้อง")
 	reqCtx.StartStep("calculate_confidence")
 	confidenceResult := processor.CalculateWeightedConfidence(
 		&templateMatchResult,
@@ -1111,12 +1134,12 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 	}
 
 	// Step 10: Check if we timed out during processing
-	select {
-	case <-timeout:
-		// Timeout occurred, but we finished anyway - return response with warning
-		reqCtx.LogWarning("⚠️  Processing completed after timeout - response may not be delivered")
-	default:
-		// Normal completion
+	if time.Now().After(deadline) {
+		// Timeout occurred, but we finished anyway - continue and store the
+		// result normally; the client's poll loop already gave up waiting
+		// past its own budget if it was going to, but a late-but-complete
+		// result is still better than none.
+		reqCtx.LogWarning("⚠️  Processing completed after the 5-minute soft deadline")
 	}
 
 	// Step 9: Build multi-image response with document analysis
@@ -1319,26 +1342,15 @@ func AnalyzeReceiptHandler(c *gin.Context) {
 		}
 	}
 
-	// Signal completion
-	select {
-	case done <- true:
-		// Successfully signaled
-	default:
-		// Channel might be closed or blocked
-	}
-
-	// Try to send response (might fail if timeout already sent error)
-	select {
-	case <-timeout:
-		reqCtx.LogError("❌ Cannot send response - timeout already occurred")
-		// Response already sent by timeout handler
-	default:
-		c.JSON(http.StatusOK, response)
-	}
+	job.Complete(response)
 }
 
-// TestTemplateHandler - Test a template with an uploaded image
-func TestTemplateHandler(c *gin.Context) {
+// SubmitTestTemplateHandler - Test a template with an uploaded image (async job).
+// The multipart form/file must be read on the request goroutine (gin.Context
+// requires it), so that part stays synchronous here; the OCR + accounting
+// analysis pipeline — the slow part — runs in a background goroutine exactly
+// like SubmitAnalyzeReceiptHandler, polled via the same GetJobStatusHandler.
+func SubmitTestTemplateHandler(c *gin.Context) {
 	// Step 1: Parse multipart form data
 	shopID := c.PostForm("shopid")
 	templateJSON := c.PostForm("template")
@@ -1438,7 +1450,8 @@ func TestTemplateHandler(c *gin.Context) {
 
 	reqCtx.LogInfo("🧪 เริ่มทดสอบ Template | ShopID: %s | Template Code: %s | File: %s", shopID, templateDocCode, header.Filename)
 
-	// Step 3: Save file temporarily
+	// Step 3: Save file temporarily — must happen here, before returning,
+	// since the multipart file stream is only valid for this request.
 	tempFilename := fmt.Sprintf("%s_%s", uuid.New().String(), filepath.Ext(header.Filename))
 	tempFilePath := filepath.Join(configs.UPLOAD_DIR, tempFilename)
 
@@ -1466,14 +1479,46 @@ func TestTemplateHandler(c *gin.Context) {
 
 	reqCtx.LogInfo("✅ File saved temporarily: %s (%.2f KB)", tempFilename, float64(header.Size)/1024)
 
+	job, token := jobs.Create(reqCtx)
+	go runTestTemplatePipeline(job, shopID, model, template, tempFilePath, tempFilename)
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"status": "processing",
+		"job": gin.H{
+			"id":            job.ID,
+			"token":         token,
+			"progress":      job.Snapshot().Progress,
+			"poll_after_ms": 2000,
+		},
+	})
+}
+
+// runTestTemplatePipeline runs the OCR + accounting-analysis pipeline for one
+// test-template job. Like runAnalyzePipeline, it must never touch *gin.Context.
+func runTestTemplatePipeline(job *jobs.Job, shopID, model string, template bson.M, tempFilePath, tempFilename string) {
+	reqCtx := job.ReqCtx
+
+	templateDocCode := "unknown"
+	if doccode, ok := template["doccode"].(string); ok {
+		templateDocCode = doccode
+	}
+
+	// Delete temp file once the pipeline is done, success or failure —
+	// mirrors the original handler's cleanup, but now covers the failure
+	// paths too (the original only deleted it after a full success).
+	defer func() {
+		if err := os.Remove(tempFilePath); err != nil {
+			reqCtx.LogWarning("⚠️  Failed to delete temp file: %v", err)
+		} else {
+			reqCtx.LogInfo("🗑️  Deleted temp file: %s", tempFilename)
+		}
+	}()
+
 	// Step 4: Load master data
+	job.UpdateProgress(10, "prepare_master_data", "กำลังโหลดข้อมูลผังบัญชี")
 	masterCache, err := storage.GetOrLoadMasterData(shopID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "Failed to load master data",
-			"details":    err.Error(),
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("master_data_load_failed", fmt.Sprintf("Failed to load master data: %s", err.Error()))
 		return
 	}
 
@@ -1490,6 +1535,7 @@ func TestTemplateHandler(c *gin.Context) {
 	reqCtx.LogInfo("✅ Template received: %s (Code: %s)", templateName, templateDocCode)
 
 	// Step 6: Process with OCR (Phase 1)
+	job.UpdateProgress(20, "ocr", "กำลังอ่านข้อความจากเอกสาร")
 	reqCtx.StartStep("pure_ocr_extraction_all")
 	reqCtx.LogInfo("Pure OCR extraction (raw text only) for 1 image(s) using %s", model)
 
@@ -1498,11 +1544,7 @@ func TestTemplateHandler(c *gin.Context) {
 	if err != nil {
 		reqCtx.LogError("Failed to create OCR provider: %v", err)
 		reqCtx.EndStep("failed", nil, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "OCR provider initialization failed",
-			"details":    err.Error(),
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("ocr_provider_init_failed", fmt.Sprintf("OCR provider initialization failed: %s", err.Error()))
 		return
 	}
 
@@ -1510,11 +1552,7 @@ func TestTemplateHandler(c *gin.Context) {
 	if err != nil {
 		reqCtx.LogError("OCR failed: %v", err)
 		reqCtx.EndStep("failed", nil, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "OCR processing failed",
-			"details":    err.Error(),
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("ocr_failed", fmt.Sprintf("OCR processing failed: %s", err.Error()))
 		return
 	}
 
@@ -1524,10 +1562,7 @@ func TestTemplateHandler(c *gin.Context) {
 	// Extract text from OCR result
 	ocrText := ocrResult.RawDocumentText
 	if ocrText == "" {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "Failed to extract text from image",
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("ocr_empty_text", "Failed to extract text from image")
 		return
 	}
 
@@ -1540,6 +1575,7 @@ func TestTemplateHandler(c *gin.Context) {
 	}
 
 	// Step 7: Force use the specified template (skip template matching)
+	job.UpdateProgress(45, "template_match", "กำลังใช้เทมเพลตที่กำหนด")
 	reqCtx.LogInfo("\n┌── template_matching_analysis")
 	reqCtx.LogInfo("🧪 Force using template: %s (Test Mode)", templateName)
 
@@ -1555,6 +1591,7 @@ func TestTemplateHandler(c *gin.Context) {
 	reqCtx.LogInfo("└── ✅ สำเร็จ")
 
 	// Step 8: Process with accounting analysis (Phase 3)
+	job.UpdateProgress(55, "prepare_master_data", "กำลังเตรียมข้อมูลผังบัญชี")
 	reqCtx.LogInfo("\n┌── 📊 เตรียมข้อมูลหลัก (Master Data)")
 
 	// Filter accounts for non-VAT shops (use all accounts for test mode)
@@ -1584,6 +1621,7 @@ func TestTemplateHandler(c *gin.Context) {
 	documentTemplates := []bson.M{template}
 
 	// Process accounting with forced template (use full_mode since we're testing)
+	job.UpdateProgress(65, "accounting_analysis", "กำลังวิเคราะห์รายการบัญชี")
 	reqCtx.StartStep("phase3_multi_image_accounting")
 
 	// Create empty vendor match result for test endpoint (no pre-matching)
@@ -1614,11 +1652,7 @@ func TestTemplateHandler(c *gin.Context) {
 	if err != nil {
 		reqCtx.LogError("Accounting analysis failed: %v", err)
 		reqCtx.EndStep("failed", nil, err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "Accounting analysis failed",
-			"details":    err.Error(),
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("accounting_analysis_failed", fmt.Sprintf("Accounting analysis failed: %s", err.Error()))
 		return
 	}
 
@@ -1626,15 +1660,12 @@ func TestTemplateHandler(c *gin.Context) {
 	var accountingResponse map[string]interface{}
 	if err := json.Unmarshal([]byte(accountingResponseJSON), &accountingResponse); err != nil {
 		reqCtx.LogError("Failed to parse accounting response: %v", err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":      "Failed to parse accounting response",
-			"details":    err.Error(),
-			"request_id": reqCtx.RequestID,
-		})
+		job.Fail("parse_failed", fmt.Sprintf("Failed to parse accounting response: %s", err.Error()))
 		return
 	}
 
 	// Step 9: Build response (same structure as analyze-receipt)
+	job.UpdateProgress(90, "confidence", "กำลังจัดรูปแบบผลลัพธ์")
 	summary := reqCtx.GetSummary()
 
 	var documentAnalysis map[string]interface{}
@@ -1750,14 +1781,7 @@ func TestTemplateHandler(c *gin.Context) {
 	reqCtx.LogInfo("✅ ทดสอบเทมเพลต: '%s' สำเร็จ", templateName)
 	reqCtx.LogInfo("═══════════════════════════")
 
-	// Delete temp file after successful processing
-	if err := os.Remove(tempFilePath); err != nil {
-		reqCtx.LogWarning("⚠️  Failed to delete temp file: %v", err)
-	} else {
-		reqCtx.LogInfo("🗑️  Deleted temp file: %s", tempFilename)
-	}
-
-	c.JSON(http.StatusOK, response)
+	job.Complete(response)
 }
 
 // formatTokenSummary formats token usage for logging
