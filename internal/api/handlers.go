@@ -910,11 +910,13 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 			for _, e := range entriesRaw {
 				if entryMap, ok := e.(map[string]interface{}); ok {
 					entry := JournalEntry{
-						AccountCode: getStringValue(entryMap, "account_code"),
-						AccountName: getStringValue(entryMap, "account_name"),
-						Debit:       getFloatValue(entryMap, "debit"),
-						Credit:      getFloatValue(entryMap, "credit"),
-						Description: getStringValue(entryMap, "description"),
+						AccountCode:     getStringValue(entryMap, "account_code"),
+						AccountName:     getStringValue(entryMap, "account_name"),
+						Debit:           getFloatValue(entryMap, "debit"),
+						Credit:          getFloatValue(entryMap, "credit"),
+						Description:     getStringValue(entryMap, "description"),
+						SelectionReason: getStringValue(entryMap, "selection_reason"),
+						SideReason:      getStringValue(entryMap, "side_reason"),
 					}
 					entries = append(entries, entry)
 				}
@@ -926,6 +928,75 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 				"balanced":     balanced,
 				"total_debit":  totalDebit,
 				"total_credit": totalCredit,
+			}
+
+			// Step 7.4: If unbalanced, try a narrow self-verification pass before
+			// confidence scoring runs (Step 7.6 reads accounting_entry["balance_check"]
+			// fresh, so correcting it here propagates automatically with no other
+			// changes needed downstream). Best-effort only — never fails the request.
+			if !balanced {
+				job.UpdateProgress(80, "verifying_balance", "กำลังตรวจสอบยอดดุลบัญชี")
+				reqCtx.StartStep("verify_balance")
+
+				verifyInput := make([]ai.VerifyEntry, len(entries))
+				for i, e := range entries {
+					verifyInput[i] = ai.VerifyEntry{
+						AccountCode:     e.AccountCode,
+						AccountName:     e.AccountName,
+						Debit:           e.Debit,
+						Credit:          e.Credit,
+						SelectionReason: e.SelectionReason,
+						SideReason:      e.SideReason,
+					}
+				}
+
+				correctedVerify, verifyTokens, verifyErr := ai.VerifyAndCorrectBalance(verifyInput, reqCtx)
+				if verifyErr != nil {
+					// Existing validation/frontend guard still catches the imbalance downstream.
+					reqCtx.LogWarning("⚠️ Balance verification failed, keeping original entries: %v", verifyErr)
+					reqCtx.EndStep("failed", verifyTokens, verifyErr)
+				} else if !ai.EntriesShapeMatches(verifyInput, correctedVerify) {
+					// Model rewrote structure (different count, different accounts, or a
+					// Dr/Cr side flip) instead of just fixing a number — untrustworthy,
+					// reject the whole correction rather than accept a partial/guessed fix.
+					reqCtx.LogWarning("⚠️ Balance verification returned a different entry shape — discarding, keeping original entries")
+					reqCtx.EndStep("rejected_shape_mismatch", verifyTokens, nil)
+				} else {
+					reqCtx.EndStep("success", verifyTokens, nil)
+
+					correctedEntries := make([]JournalEntry, len(entries))
+					for i, e := range entries {
+						correctedEntries[i] = e
+						correctedEntries[i].Debit = correctedVerify[i].Debit
+						correctedEntries[i].Credit = correctedVerify[i].Credit
+					}
+
+					newBalanced, newTotalDebit, newTotalCredit := ValidateDoubleEntry(correctedEntries)
+					if newBalanced {
+						reqCtx.LogInfo("✅ Balance verification corrected the imbalance")
+					} else {
+						reqCtx.LogWarning("⚠️ Balance verification ran but entries still unbalanced — keeping its output for review")
+					}
+
+					// Write corrected debit/credit back into the original entriesRaw maps
+					// (mutate in place — entriesRaw elements are accountingEntry["entries"]'s
+					// own []interface{} maps, same objects the final response serializes).
+					for i, corrected := range correctedVerify {
+						if entryMap, ok := entriesRaw[i].(map[string]interface{}); ok {
+							entryMap["debit"] = corrected.Debit
+							entryMap["credit"] = corrected.Credit
+						}
+					}
+					accountingEntry["balance_check"] = map[string]interface{}{
+						"balanced":     newBalanced,
+						"total_debit":  newTotalDebit,
+						"total_credit": newTotalCredit,
+					}
+					accountingEntry["balance_verification"] = map[string]interface{}{
+						"attempted": true,
+						"corrected": newBalanced,
+					}
+				}
 			}
 		}
 	}
