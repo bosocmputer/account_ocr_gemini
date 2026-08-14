@@ -185,10 +185,16 @@ func extractTemplateAccounts(matchedTemplate bson.M, templateDesc string, select
 		}
 	}
 
+	templateCode := ""
+	if doccode, ok := matchedTemplate["doccode"].(string); ok {
+		templateCode = doccode
+	}
+
 	return map[string]interface{}{
 		"template_used":    true,
 		"template_name":    templateDesc,
 		"template_id":      matchedTemplate["_id"],
+		"template_code":    templateCode,
 		"accounts_used":    accountsUsed,
 		"selection_reason": selectionReason,
 		"confidence":       99,
