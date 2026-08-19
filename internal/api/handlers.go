@@ -247,6 +247,70 @@ func enforceActionCodeSides(entries []JournalEntry, actionCodes map[string]strin
 	return corrected, changed
 }
 
+// extractVatAccountCodes reads accountcode -> isvatline (bool) from a matched
+// document-format template's details[], returning only the account codes
+// where isvatline is true. Mirrors extractActionCodesByAccountCode exactly:
+// same bson.A/[]interface{} and bson.M/map[string]interface{} handling, same
+// "nil template or no details -> empty map" contract. The AI has no concept
+// of isvatline (it's never in the prompt or output schema) — the field only
+// exists in the stored template, set once by the bookkeeper in
+// DocumentFormatForm.vue (ToggleSwitch "รายการภาษี VAT", same UI pattern as
+// linktodebtaccount), so it must be applied deterministically here, after the
+// AI has already returned its entries, not trusted from AI judgement.
+//
+// Multiple rows may be marked true at different account codes without any
+// special handling — each gets its own map entry (map[string]bool, matched
+// by account_code same as actioncode). The frontend sums every entries[] row
+// this map matches into one VAT-tab total; that's a deliberate, sanctioned
+// design (e.g. VAT split across multiple line items), not an error case.
+func extractVatAccountCodes(matchedTemplate *bson.M) map[string]bool {
+	result := map[string]bool{}
+	if matchedTemplate == nil {
+		return result
+	}
+
+	var rawDetails []interface{}
+	if details, ok := (*matchedTemplate)["details"].(bson.A); ok {
+		rawDetails = details
+	} else if details, ok := (*matchedTemplate)["details"].([]interface{}); ok {
+		rawDetails = details
+	}
+
+	for _, d := range rawDetails {
+		var detailMap map[string]interface{}
+		if bm, ok := d.(bson.M); ok {
+			detailMap = bm
+		} else if m, ok := d.(map[string]interface{}); ok {
+			detailMap = m
+		} else {
+			continue
+		}
+
+		accountCode := getStringValue(detailMap, "accountcode")
+		if accountCode != "" && getBoolValue(detailMap, "isvatline") {
+			result[accountCode] = true
+		}
+	}
+	return result
+}
+
+// markVatLines returns which of the given entries are VAT lines, matched by
+// account_code against vatAccountCodes (never by position — the AI can
+// reorder/omit rows relative to the template, same reasoning as
+// enforceActionCodeSides). Unlike enforceActionCodeSides this never mutates
+// Debit/Credit — it only classifies. Callers use the returned map to set an
+// is_vat_line field on the corresponding entryMap in entriesRaw. Returns an
+// empty, non-nil map (never touches "changed") when vatAccountCodes is empty,
+// so callers can iterate entries unconditionally and always get an explicit
+// true/false per entry rather than a sometimes-missing field.
+func markVatLines(entries []JournalEntry, vatAccountCodes map[string]bool) map[string]bool {
+	marked := map[string]bool{}
+	for _, e := range entries {
+		marked[e.AccountCode] = vatAccountCodes[e.AccountCode]
+	}
+	return marked
+}
+
 // Helper functions for custom prompts extraction
 func extractShopContextForResponse(shopProfile interface{}) string {
 	if shopProfile == nil {
@@ -318,6 +382,13 @@ func getFloatValue(m map[string]interface{}, key string) float64 {
 		return val
 	}
 	return 0.0
+}
+
+func getBoolValue(m map[string]interface{}, key string) bool {
+	if val, ok := m[key].(bool); ok {
+		return val
+	}
+	return false
 }
 
 // downloadImageFromURL downloads an image or PDF from a URL and saves it to a local file
@@ -1023,6 +1094,26 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 					}
 				}
 				reqCtx.LogInfo("✅ Enforced template actioncode (DR/CR) on one or more entries")
+			}
+
+			// Mark VAT lines deterministically from the template's isvatline flag
+			// (bookkeeper-set per row in DocumentFormatForm.vue), matched by
+			// account_code — needed because some receipts (e.g. abbreviated tax
+			// invoices, "ใบกำกับภาษีอย่างย่อ") never print a separate VAT figure, so
+			// receipt.vat comes back null even though the template still computes
+			// and posts a real VAT line into entries[]. Without this flag the
+			// frontend's VAT tab has no way to find that line. Always sets an
+			// explicit true/false per entry (never omits the field) so the
+			// frontend never has to guess between "false" and "not present".
+			vatAccountCodes := extractVatAccountCodes(matchedTemplate)
+			vatLineMarks := markVatLines(entries, vatAccountCodes)
+			for i, e := range entries {
+				if entryMap, ok := entriesRaw[i].(map[string]interface{}); ok {
+					entryMap["is_vat_line"] = vatLineMarks[e.AccountCode]
+				}
+			}
+			if len(vatAccountCodes) > 0 {
+				reqCtx.LogInfo("✅ Marked VAT line(s) on entries per template isvatline flag")
 			}
 
 			// Validate and add balance check
@@ -1892,6 +1983,20 @@ func runTestTemplatePipeline(job *jobs.Job, shopID, model string, template bson.
 					}
 				}
 				reqCtx.LogInfo("✅ Enforced template actioncode (DR/CR) on one or more entries (test mode)")
+			}
+
+			// Mark VAT lines deterministically — same reasoning and pattern as
+			// runAnalyzePipeline, mirrored here so "ทดสอบ Prompt OCR" reflects the
+			// same VAT-line marking a real analysis would produce.
+			vatAccountCodes := extractVatAccountCodes(matchedTemplate)
+			vatLineMarks := markVatLines(entries, vatAccountCodes)
+			for i, e := range entries {
+				if entryMap, ok := entriesRaw[i].(map[string]interface{}); ok {
+					entryMap["is_vat_line"] = vatLineMarks[e.AccountCode]
+				}
+			}
+			if len(vatAccountCodes) > 0 {
+				reqCtx.LogInfo("✅ Marked VAT line(s) on entries per template isvatline flag (test mode)")
 			}
 		}
 	}
