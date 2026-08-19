@@ -164,6 +164,89 @@ func ValidateDoubleEntry(entries []JournalEntry) (bool, float64, float64) {
 	return balanced, totalDebit, totalCredit
 }
 
+// extractActionCodesByAccountCode reads accountcode -> actioncode ("DR"/"CR"/"")
+// from a matched document-format template's details[]. The AI prompt never
+// receives actioncode in FullMode (FormatTemplatesSection whitelists only
+// accountcode+detail) and even in TemplateOnlyMode where the raw template is
+// dumped into the prompt, nothing instructs the AI to honor it — so this must
+// be enforced deterministically here rather than trusted from the AI's own
+// debit/credit placement. Returns an empty map if there's no template or no
+// details, in which case callers should skip enforcement entirely (a nil/empty
+// map means "no opinion", not "force everything to one side").
+func extractActionCodesByAccountCode(matchedTemplate *bson.M) map[string]string {
+	result := map[string]string{}
+	if matchedTemplate == nil {
+		return result
+	}
+
+	var rawDetails []interface{}
+	if details, ok := (*matchedTemplate)["details"].(bson.A); ok {
+		rawDetails = details
+	} else if details, ok := (*matchedTemplate)["details"].([]interface{}); ok {
+		rawDetails = details
+	}
+
+	for _, d := range rawDetails {
+		var detailMap map[string]interface{}
+		if bm, ok := d.(bson.M); ok {
+			detailMap = bm
+		} else if m, ok := d.(map[string]interface{}); ok {
+			detailMap = m
+		} else {
+			continue
+		}
+
+		accountCode := getStringValue(detailMap, "accountcode")
+		actionCode := strings.ToUpper(strings.TrimSpace(getStringValue(detailMap, "actioncode")))
+		if accountCode != "" && (actionCode == "DR" || actionCode == "CR") {
+			result[accountCode] = actionCode
+		}
+	}
+	return result
+}
+
+// enforceActionCodeSides moves each entry's amount to the debit/credit column
+// dictated by the template's actioncode for that account_code (matched by
+// code, not position — the AI can reorder/omit rows relative to the template,
+// same reasoning already used for linktodebtaccount substitution). Entries
+// whose account_code has no actioncode opinion (empty map lookup) are left
+// untouched — actioncode is optional per row ("ไม่ระบุก็ได้"), not mandatory.
+// Must run BEFORE ValidateDoubleEntry/balance verification so the balance
+// check reflects the corrected side placement, not the AI's original guess.
+func enforceActionCodeSides(entries []JournalEntry, actionCodes map[string]string) (corrected []JournalEntry, changed bool) {
+	if len(actionCodes) == 0 {
+		return entries, false
+	}
+	corrected = make([]JournalEntry, len(entries))
+	for i, e := range entries {
+		corrected[i] = e
+		side, ok := actionCodes[e.AccountCode]
+		if !ok {
+			continue
+		}
+		// Only touch clean single-sided rows (exactly one of debit/credit nonzero).
+		// A row with both nonzero is already malformed double-entry data regardless
+		// of actioncode — summing them into "the amount" would be a guess, not a
+		// correction, so leave it as-is and let the existing balance check/review
+		// flow surface it instead of silently fabricating a number here.
+		isSingleSided := (e.Debit > 0) != (e.Credit > 0)
+		if !isSingleSided {
+			continue
+		}
+		amount := e.Debit + e.Credit
+		if side == "DR" && e.Credit > 0 {
+			corrected[i].Debit = amount
+			corrected[i].Credit = 0
+			changed = true
+		} else if side == "CR" && e.Debit > 0 {
+			corrected[i].Credit = amount
+			corrected[i].Debit = 0
+			changed = true
+		}
+	}
+	return corrected, changed
+}
+
 // Helper functions for custom prompts extraction
 func extractShopContextForResponse(shopProfile interface{}) string {
 	if shopProfile == nil {
@@ -920,6 +1003,26 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 					}
 					entries = append(entries, entry)
 				}
+			}
+
+			// Step 6.5: Enforce template actioncode (DR/CR) deterministically.
+			// The AI is never told to honor actioncode (FullMode strips it out of
+			// the prompt entirely; TemplateOnlyMode includes it in the raw JSON dump
+			// but no instruction tells the AI what to do with it) — so a row marked
+			// actioncode:"DR" in the template could still come back with its amount
+			// in credit purely from the AI's own judgement. Correct that here, before
+			// the balance check, so downstream balance/confidence scoring reflects
+			// the enforced side rather than the AI's original (possibly wrong) one.
+			actionCodes := extractActionCodesByAccountCode(matchedTemplate)
+			if correctedSides, changed := enforceActionCodeSides(entries, actionCodes); changed {
+				entries = correctedSides
+				for i, e := range entries {
+					if entryMap, ok := entriesRaw[i].(map[string]interface{}); ok {
+						entryMap["debit"] = e.Debit
+						entryMap["credit"] = e.Credit
+					}
+				}
+				reqCtx.LogInfo("✅ Enforced template actioncode (DR/CR) on one or more entries")
 			}
 
 			// Validate and add balance check
@@ -1761,6 +1864,37 @@ func runTestTemplatePipeline(job *jobs.Job, shopID, model string, template bson.
 
 	accountingEntry := accountingResponse["accounting_entry"]
 	validationData := accountingResponse["validation"]
+
+	// Enforce template actioncode (DR/CR) deterministically — same reasoning as
+	// runAnalyzePipeline: this test endpoint forces ai.FullMode (line ~1791
+	// above), which strips actioncode out of the prompt entirely, so the AI has
+	// no way to honor it even if it wanted to. Mirrors the enforcement in the
+	// real analyze-receipt path so "ทดสอบ Prompt OCR" reflects the same behavior
+	// a real analysis would produce, rather than silently differing.
+	if aeMap, ok := accountingEntry.(map[string]interface{}); ok {
+		if entriesRaw, ok := aeMap["entries"].([]interface{}); ok {
+			entries := []JournalEntry{}
+			for _, e := range entriesRaw {
+				if entryMap, ok := e.(map[string]interface{}); ok {
+					entries = append(entries, JournalEntry{
+						AccountCode: getStringValue(entryMap, "account_code"),
+						Debit:       getFloatValue(entryMap, "debit"),
+						Credit:      getFloatValue(entryMap, "credit"),
+					})
+				}
+			}
+			actionCodes := extractActionCodesByAccountCode(matchedTemplate)
+			if correctedSides, changed := enforceActionCodeSides(entries, actionCodes); changed {
+				for i, e := range correctedSides {
+					if entryMap, ok := entriesRaw[i].(map[string]interface{}); ok {
+						entryMap["debit"] = e.Debit
+						entryMap["credit"] = e.Credit
+					}
+				}
+				reqCtx.LogInfo("✅ Enforced template actioncode (DR/CR) on one or more entries (test mode)")
+			}
+		}
+	}
 
 	// Add fields_requiring_review
 	fieldsRequiringReview := []string{}
