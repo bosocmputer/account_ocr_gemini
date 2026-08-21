@@ -88,6 +88,19 @@ func main() {
 	billscan.POST("/api/v1/analyze-receipt", api.SubmitAnalyzeReceiptHandler)
 	billscan.POST("/api/v1/test-template", api.SubmitTestTemplateHandler)
 	billscan.GET("/api/v1/jobs/:id", api.GetJobStatusHandler)
+	// Synchronous (not job-based) — used by the bcaccount Excel importer to
+	// bulk-check duplicate document numbers before a save. See
+	// CheckDocnosExistHandler's doc comment for why this lives here rather
+	// than on the main accounting API.
+	billscan.POST("/api/v1/check-docnos-exist", api.CheckDocnosExistHandler)
+	// Async job, same submit-then-poll pattern as analyze-receipt/
+	// test-template above (reuses the same GET /api/v1/jobs/:id endpoint).
+	// Moves the bcaccount Excel importer's full parse+validate pipeline
+	// (previously a synchronous client-side JS loop over the whole file)
+	// server-side, so validation logic is enforced identically for every
+	// user and large files (5,000-20,000+ rows) no longer freeze the
+	// browser tab. See SubmitImportValidationHandler's doc comment.
+	billscan.POST("/api/v1/import-journal/validate", api.SubmitImportValidationHandler)
 
 	// Step 4: Setup HTTP server with timeouts.
 	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute

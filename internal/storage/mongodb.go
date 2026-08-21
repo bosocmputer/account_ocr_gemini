@@ -176,6 +176,38 @@ func GetJournalBooks(shopID string, additionalFilter bson.M) ([]bson.M, error) {
 	return results, nil
 }
 
+// GetAccountGroups retrieves account groups from MongoDB filtered by shopid.
+// Collection name/casing ("accountGroups") verified directly against the dev
+// database before writing this — Mongo collection names are case-sensitive
+// and this codebase's own casing is inconsistent (chartofaccounts vs
+// journalBooks vs documentFormate), so it isn't safe to assume from pattern
+// alone. Added for the Excel-import validation pipeline, which needs this to
+// check the optional "accountgroup" column the same way the old client-side
+// importer did (a warning, not a blocking error, if the code isn't found).
+func GetAccountGroups(shopID string, additionalFilter bson.M) ([]bson.M, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{"shopid": shopID}
+	for k, v := range additionalFilter {
+		filter[k] = v
+	}
+
+	collection := mongoDB.Collection("accountGroups")
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query accountGroups: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []bson.M
+	if err = cursor.All(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
 // GetDocumentFormate retrieves accounting templates from the documentFormate
 // collection, filtered by shopid, excluding templates with no details (an
 // empty template has nothing for the AI to match against). Moved here from
@@ -264,6 +296,65 @@ func GetDebtors(shopID string, additionalFilter bson.M) ([]bson.M, error) {
 	}
 
 	return results, nil
+}
+
+// JournalsCollectionName is the Mongo collection holding saved journal
+// entries — used by CheckJournalDocnosExist for the bulk duplicate-docno
+// check. Kept as a package-level var (not a literal inline) so a wrong guess
+// here is a one-line fix rather than a re-read of this whole function.
+const JournalsCollectionName = "journals"
+
+// CheckJournalDocnosExist checks which of the given docnos already have a
+// saved journal entry for this shop. Used by the accounting-entries Excel
+// importer (bcaccount) to flag duplicate document numbers before a bulk
+// save — that importer previously called GET /gl/journal/docno/:docno once
+// per document, which meant a 10,000-row import fired 10,000 individual
+// HTTP round-trips. This does the same check in one query per chunk.
+//
+// Returns only the docnos that already exist (not full records — the caller
+// only needs existence, and returning full documents would be wasted
+// bandwidth for what's purely a duplicate-warning check).
+func CheckJournalDocnosExist(shopID string, docnos []string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if len(docnos) == 0 {
+		return []string{}, nil
+	}
+
+	filter := bson.M{
+		"shopid": shopID,
+		"docno":  bson.M{"$in": docnos},
+	}
+	projection := bson.M{"docno": 1, "_id": 0}
+
+	collection := mongoDB.Collection(JournalsCollectionName)
+	cursor, err := collection.Find(ctx, filter, options.Find().SetProjection(projection))
+	if err != nil {
+		return nil, fmt.Errorf("failed to query journals: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var docs []bson.M
+	if err = cursor.All(ctx, &docs); err != nil {
+		return nil, fmt.Errorf("failed to decode journals: %w", err)
+	}
+
+	// Dedupe — the caller only needs existence (yes/no) per docno, and more
+	// than one saved journal can legitimately share a docno in this database
+	// (e.g. re-imports), so the same docno can appear multiple times in docs.
+	seen := make(map[string]bool, len(docs))
+	existing := make([]string, 0, len(docs))
+	for _, d := range docs {
+		docno, ok := d["docno"].(string)
+		if !ok || seen[docno] {
+			continue
+		}
+		seen[docno] = true
+		existing = append(existing, docno)
+	}
+
+	return existing, nil
 }
 
 // --- Draft Management Functions ---

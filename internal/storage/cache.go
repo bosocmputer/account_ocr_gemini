@@ -13,6 +13,7 @@ import (
 type MasterDataCache struct {
 	Accounts          []bson.M
 	JournalBooks      []bson.M
+	AccountGroups     []bson.M // accountGroups collection — used by the Excel-import validation pipeline
 	Creditors         []bson.M
 	Debtors           []bson.M     // เพิ่มลูกหนี้
 	ShopProfile       *ShopProfile // เพิ่มข้อมูลบริษัท
@@ -60,6 +61,11 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 		return nil, err
 	}
 
+	accountGroups, err := GetAccountGroups(shopID, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+
 	creditors, err := GetCreditors(shopID, bson.M{})
 	if err != nil {
 		return nil, err
@@ -84,6 +90,7 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 	newCache := &MasterDataCache{
 		Accounts:          accounts,
 		JournalBooks:      journalBooks,
+		AccountGroups:     accountGroups,
 		Creditors:         creditors,
 		Debtors:           debtors,
 		ShopProfile:       shopProfile,

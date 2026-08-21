@@ -80,6 +80,15 @@ var (
 	CONFIDENCE_HIGH_THRESHOLD   = "high"   // AI is very confident
 	CONFIDENCE_MEDIUM_THRESHOLD = "medium" // AI has some uncertainty
 	CONFIDENCE_LOW_THRESHOLD    = "low"    // AI is uncertain, requires review
+
+	// Excel journal-import validation limits — this is the first pipeline in
+	// this service to need file-size/row-count guards, so there was no prior
+	// convention to inherit. Rejected synchronously (400, before a job is
+	// created) when known from the upload itself (file size); rejected as an
+	// early job.Fail when only knowable after opening the file (row count).
+	EXCEL_IMPORT_MAX_ROWS         int // reject files with more data rows than this
+	EXCEL_IMPORT_MAX_FILE_SIZE_MB int // reject uploads larger than this, checked from the multipart header before saving to disk
+	EXCEL_IMPORT_TIMEOUT_SEC      int // pipeline deadline, checked periodically inside the row-processing loop (not just at stage boundaries — that loop is this pipeline's dominant cost)
 )
 
 // LoadConfig loads configuration from environment variables
@@ -147,6 +156,11 @@ func LoadConfig() {
 	// Gemini rate limiter (internal/ratelimit) still caps actual API request
 	// rate independent of this number — raising this doesn't risk more 429s.
 	OCR_WORKER_COUNT = getEnvInt("OCR_WORKER_COUNT", 3)
+
+	// Excel journal-import validation limits
+	EXCEL_IMPORT_MAX_ROWS = getEnvInt("EXCEL_IMPORT_MAX_ROWS", 20000)
+	EXCEL_IMPORT_MAX_FILE_SIZE_MB = getEnvInt("EXCEL_IMPORT_MAX_FILE_SIZE_MB", 15)
+	EXCEL_IMPORT_TIMEOUT_SEC = getEnvInt("EXCEL_IMPORT_TIMEOUT_SEC", 180)
 
 	log.Println("✓ Configuration loaded successfully")
 }

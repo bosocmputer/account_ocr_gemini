@@ -651,6 +651,79 @@ func GetJobStatusHandler(c *gin.Context) {
 	}
 }
 
+// CheckDocnosExistRequest is the request body for CheckDocnosExistHandler.
+type CheckDocnosExistRequest struct {
+	ShopID string   `json:"shopid"`
+	Docnos []string `json:"docnos"`
+}
+
+// maxDocnosPerCheckRequest caps how many docnos a single request may check —
+// keeps the $in query and its response bounded even if a caller forgets to
+// chunk client-side. The bcaccount importer chunks at 500 per its own spec;
+// this is set a little above that as headroom, not as the intended chunk size.
+const maxDocnosPerCheckRequest = 1000
+
+// CheckDocnosExistHandler checks which of the given journal document numbers
+// already exist for a shop, in one bulk query. Added for the bcaccount
+// column-mapping Excel importer (ImportAccountingEntries.vue), which
+// previously checked one docno at a time via the main accounting API
+// (GET /gl/journal/docno/:docno) — fine for small files, but a 5,000+ row
+// import meant thousands of sequential round-trips and a multi-minute wait.
+// This service already holds a MongoDB connection to the same database for
+// its own master-data reads (chart of accounts, debtors, creditors), so a
+// bulk existence check is a natural fit here rather than requiring the main
+// accounting API to grow a new bulk endpoint of its own.
+func CheckDocnosExistHandler(c *gin.Context) {
+	var req CheckDocnosExistRequest
+	if err := c.BindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "invalid request format",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	if req.ShopID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   "shopid is required",
+		})
+		return
+	}
+
+	if len(req.Docnos) == 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"success":  true,
+			"existing": []string{},
+		})
+		return
+	}
+
+	if len(req.Docnos) > maxDocnosPerCheckRequest {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("too many docnos in one request (max %d) — split into smaller chunks", maxDocnosPerCheckRequest),
+		})
+		return
+	}
+
+	existing, err := storage.CheckJournalDocnosExist(req.ShopID, req.Docnos)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   "failed to check docnos",
+			"details": err.Error(),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"success":  true,
+		"existing": existing,
+	})
+}
+
 // runAnalyzePipeline runs the full OCR + accounting-analysis pipeline for
 // one job. It must never touch *gin.Context — every input it needs was
 // already extracted into plain Go values by SubmitAnalyzeReceiptHandler

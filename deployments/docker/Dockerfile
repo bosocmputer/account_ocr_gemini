@@ -1,5 +1,7 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+# 1.25 required since go.mod's `go` directive was bumped by adding excelize
+# (github.com/xuri/excelize/v2), which itself requires Go >= 1.25.
+FROM golang:1.25-alpine AS builder
 
 # Install build dependencies
 RUN apk add --no-cache git
