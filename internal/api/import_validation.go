@@ -951,7 +951,7 @@ func buildParsedDocuments(
 		// VAT block — only built/validated if vatdocno is non-empty
 		// somewhere in this document.
 		vatdocnoField := collectRowLevelField(g.SourceRows, "vatdocno", false)
-		var vats []ImportVat
+		vats := []ImportVat{} // never nil — marshals to [] not null, matching the old client-side default
 		if vatdocnoField.HasValue && vatdocnoField.Value != "" {
 			vatdocno := vatdocnoField.Value
 			if vatdocnoField.HasConflict {
@@ -1007,7 +1007,7 @@ func buildParsedDocuments(
 
 		// WHT block — same all-rows scan + conflict detection as VAT above.
 		taxdocnoField := collectRowLevelField(g.SourceRows, "taxdocno", false)
-		var taxes []ImportTax
+		taxes := []ImportTax{} // never nil — marshals to [] not null, matching the old client-side default
 		if taxdocnoField.HasValue && taxdocnoField.Value != "" {
 			taxdocno := taxdocnoField.Value
 			if taxdocnoField.HasConflict {
