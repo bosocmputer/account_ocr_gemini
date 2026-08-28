@@ -575,10 +575,14 @@ func buildSmlSalesDocument(
 		}
 	}
 
-	if vatLineCount != 1 {
+	// A document with zero VAT lines is valid — not every daily-journal entry
+	// carries VAT (deposits, non-taxable revenue, etc.), so this only errors
+	// when there's genuine ambiguity (more than one line coded as the VAT
+	// account), not when VAT is legitimately absent.
+	if vatLineCount > 1 {
 		issues = append(issues, ImportIssue{
 			Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "vatamount",
-			Message: fmt.Sprintf("เอกสารนี้ไม่มีรายการภาษีขาย (%s) หรือมีมากกว่า 1 รายการ", vatOutputAccountCode),
+			Message: fmt.Sprintf(`เอกสารนี้มีรายการภาษีขาย (%s) มากกว่า 1 รายการ`, vatOutputAccountCode),
 		})
 	}
 
@@ -590,6 +594,16 @@ func buildSmlSalesDocument(
 	}
 
 	vats := []ImportVat{}
+	if vatLineCount == 0 && vatRec != nil {
+		// The VAT report says this docno has VAT, but the journal file itself
+		// has no line coded as the VAT account — surfaced as a warning since
+		// it signals the two files disagree, without blocking the import (the
+		// journal file's own line composition remains authoritative).
+		issues = append(issues, ImportIssue{
+			Severity: "warning", RowNumbers: g.RowNums, Docno: docno, Field: "vatamount",
+			Message: fmt.Sprintf(`เอกสาร "%s" มีข้อมูลในไฟล์รายงานภาษีขาย (ยอดภาษี %.2f) แต่ไม่พบรายการภาษีขาย (%s) ในไฟล์รายงานข้อมูลรายวัน — จะนำเข้าโดยไม่มีข้อมูลภาษี`, docno, vatRec.VatAmount, vatOutputAccountCode),
+		})
+	}
 	if vatLineCount >= 1 {
 		var vatEntry ImportVat
 		if vatRec != nil {

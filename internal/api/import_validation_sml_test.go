@@ -182,6 +182,71 @@ func TestResolveSmlBookcode_NameFallback(t *testing.T) {
 	}
 }
 
+// TestBuildSmlSalesDocument_NoVatLine verifies a document with zero lines
+// coded as the VAT account imports cleanly (vats[] empty, no error) — not
+// every daily-journal entry carries VAT (deposits, non-taxable revenue,
+// etc.), so this must not be treated as a structural problem. A document
+// with MORE than one VAT-coded line must still error, since that's genuine
+// ambiguity the pipeline can't resolve on its own.
+func TestBuildSmlSalesDocument_NoVatLine(t *testing.T) {
+	chartOfAccountsMap := map[string]bson.M{
+		"1113903": {"accountcode": "1113903", "accountname": "บัญชีออมทรัพย์"},
+		"2140410": {"accountcode": "2140410", "accountname": "เงินมัดจำจากลูกค้า"},
+		"2140170": {"accountcode": "2140170", "accountname": "ภาษีมูลค่าเพิ่ม-ภาษีขาย"},
+	}
+	journalBookCodeMap := map[string]bson.M{}
+	journalBookNameMap := map[string]bson.M{
+		"สมุดรายวันขาย": {"code": "INV", "name1": "สมุดรายวันขาย"},
+	}
+
+	noVatGroup := smlDailyDocGroup{
+		Header: smlDailyDocHeader{Docno: "SRV-NOVAT-01", DocdateRaw: "1/8/2569", BookcodeRaw: "02/สมุดรายวันขาย", Description: "รับเงินมัดจำ ไม่มีภาษี"},
+		Lines: []smlDailyDetailLine{
+			{AccountCode: "1113903", Debit: 1000, RowNum: 7},
+			{AccountCode: "2140410", Credit: 1000, RowNum: 8},
+		},
+		RowNums: []int{6, 7, 8},
+	}
+
+	doc, issues := buildSmlSalesDocument(noVatGroup, "2140170", nil, chartOfAccountsMap, journalBookCodeMap, journalBookNameMap)
+	fmt.Printf("=== NO-VAT DOCUMENT RESULT ===\nissues: %d\n", len(issues))
+	for _, iss := range issues {
+		fmt.Printf("  [%s] %s\n", iss.Severity, iss.Message)
+	}
+	for _, iss := range issues {
+		if iss.Severity == "error" {
+			t.Errorf("unexpected error on a legitimately VAT-less document: %s", iss.Message)
+		}
+	}
+	if len(doc.Vats) != 0 {
+		t.Errorf("expected empty Vats for a document with no VAT line, got %d entries: %+v", len(doc.Vats), doc.Vats)
+	}
+	if doc.Taxes == nil || len(doc.Taxes) != 0 {
+		t.Errorf("expected empty non-nil Taxes, got %v", doc.Taxes)
+	}
+
+	// Multiple VAT-coded lines must still error — genuine ambiguity.
+	multiVatGroup := smlDailyDocGroup{
+		Header: smlDailyDocHeader{Docno: "IV-MULTIVAT-01", DocdateRaw: "1/8/2569", BookcodeRaw: "02/สมุดรายวันขาย"},
+		Lines: []smlDailyDetailLine{
+			{AccountCode: "1113903", Debit: 2000, RowNum: 7},
+			{AccountCode: "2140170", Credit: 1000, RowNum: 8},
+			{AccountCode: "2140170", Credit: 1000, RowNum: 9},
+		},
+		RowNums: []int{6, 7, 8, 9},
+	}
+	_, issues2 := buildSmlSalesDocument(multiVatGroup, "2140170", nil, chartOfAccountsMap, journalBookCodeMap, journalBookNameMap)
+	foundMultiVatError := false
+	for _, iss := range issues2 {
+		if iss.Severity == "error" && iss.Field == "vatamount" {
+			foundMultiVatError = true
+		}
+	}
+	if !foundMultiVatError {
+		t.Error("expected an error for a document with more than one VAT-coded line")
+	}
+}
+
 // TestBuildSmlSalesDocument_EndToEnd runs buildSmlSalesDocument against the
 // real sample file's parsed groups, using a synthetic masterdata map built
 // from exactly the accountcodes/bookcode-name the file itself contains —
