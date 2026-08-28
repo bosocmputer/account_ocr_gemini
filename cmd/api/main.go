@@ -101,6 +101,11 @@ func main() {
 	// user and large files (5,000-20,000+ rows) no longer freeze the
 	// browser tab. See SubmitImportValidationHandler's doc comment.
 	billscan.POST("/api/v1/import-journal/validate", api.SubmitImportValidationHandler)
+	// Async job, same submit-then-poll pattern as the generic import-journal
+	// validator above — dedicated pipeline for the fixed-format SML ERP
+	// "รายงานข้อมูลรายวัน" (+ optional "รายงานภาษีขาย") sales-journal export.
+	// See SubmitSmlSalesImportValidationHandler's doc comment.
+	billscan.POST("/api/v1/import-journal/validate-sml-sales", api.SubmitSmlSalesImportValidationHandler)
 
 	// Step 4: Setup HTTP server with timeouts.
 	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute
@@ -125,6 +130,7 @@ func main() {
 		log.Println("  POST /billscan/api/v1/analyze-receipt (async — returns a job id)")
 		log.Println("  POST /billscan/api/v1/test-template (async — returns a job id)")
 		log.Println("  GET  /billscan/api/v1/jobs/:id (poll progress/result)")
+		log.Println("  POST /billscan/api/v1/import-journal/validate-sml-sales (async — returns a job id)")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
