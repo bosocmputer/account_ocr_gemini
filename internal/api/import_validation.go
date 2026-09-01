@@ -48,19 +48,34 @@ type ImportFieldSource struct {
 	AccountCode *string `json:"accountcode"`
 }
 
+// ImportAmountColumnSource mirrors one auto-detected D_/C_ header-embedded
+// amount column from the frontend's detectedAmountColumns computed —
+// resolved client-side from header text (e.g. "D_111110" -> debit into
+// accountcode "111110"), sent here already-resolved. Same division of
+// labor as DebitSource/CreditSource: the frontend interprets column
+// headers, this backend just applies the result. Unlike ImportFieldSource,
+// there is no "fixed" mode — a D_/C_ header always names exactly one
+// column, one accountcode, one side.
+type ImportAmountColumnSource struct {
+	Column      int    `json:"column"`
+	AccountCode string `json:"accountcode"`
+	Side        string `json:"side"` // "debit" | "credit"
+}
+
 // ImportValidationConfig mirrors the Vue component's Step 2/3 state exactly —
 // serialized as-is from fieldMappings/rowMode/etc., no new client-side data
 // model needed.
 type ImportValidationConfig struct {
-	HeaderRowIndex     int               `json:"headerRowIndex"`
-	RowMode            string            `json:"rowMode"`         // "per-line" | "per-document-2-line"
-	AmountSplitMode    string            `json:"amountSplitMode"` // "separate" | "signed-single-column"
-	DebitSource        ImportFieldSource `json:"debitSource"`
-	CreditSource       ImportFieldSource `json:"creditSource"`
-	SignedAmountColumn *int              `json:"signedAmountColumn"`
-	DebitAmountColumn  *int              `json:"debitAmountColumn"`
-	CreditAmountColumn *int              `json:"creditAmountColumn"`
-	FieldMappings      map[string]*int   `json:"fieldMappings"`
+	HeaderRowIndex     int                        `json:"headerRowIndex"`
+	RowMode            string                     `json:"rowMode"`         // "per-line" | "per-document-2-line" | "per-document-columns"
+	AmountSplitMode    string                     `json:"amountSplitMode"` // "separate" | "signed-single-column"
+	DebitSource        ImportFieldSource          `json:"debitSource"`
+	CreditSource       ImportFieldSource          `json:"creditSource"`
+	SignedAmountColumn *int                       `json:"signedAmountColumn"`
+	DebitAmountColumn  *int                       `json:"debitAmountColumn"`
+	CreditAmountColumn *int                       `json:"creditAmountColumn"`
+	AmountColumns      []ImportAmountColumnSource `json:"amountColumns"` // "per-document-columns" only
+	FieldMappings      map[string]*int            `json:"fieldMappings"`
 }
 
 // ImportIssue mirrors the JS `issues` array entries exactly.
@@ -266,9 +281,36 @@ func SubmitImportValidationHandler(c *gin.Context) {
 // validate (e.g. per-document-2-line mode with neither debit nor credit
 // source configured).
 func validateImportConfig(cfg *ImportValidationConfig) string {
-	if cfg.RowMode != "per-line" && cfg.RowMode != "per-document-2-line" {
-		return "rowMode must be 'per-line' or 'per-document-2-line'"
+	if cfg.RowMode != "per-line" && cfg.RowMode != "per-document-2-line" && cfg.RowMode != "per-document-columns" {
+		return "rowMode must be 'per-line', 'per-document-2-line', or 'per-document-columns'"
 	}
+
+	if cfg.RowMode == "per-document-columns" {
+		// AmountColumns is a JSON-decoded slice arriving over an
+		// unauthenticated endpoint (see this file's own header comment on
+		// the /billscan auth gap) — validate every entry rather than
+		// trusting it, since a bad Side value would otherwise silently
+		// misclassify an amount to the wrong side of the ledger downstream.
+		if len(cfg.AmountColumns) == 0 {
+			return "amountColumns must contain at least one D_/C_ column when rowMode is 'per-document-columns'"
+		}
+		if len(cfg.AmountColumns) > 200 {
+			return "amountColumns has too many entries (max 200)"
+		}
+		for i, ac := range cfg.AmountColumns {
+			if ac.Side != "debit" && ac.Side != "credit" {
+				return fmt.Sprintf("amountColumns[%d].side must be 'debit' or 'credit', got %q", i, ac.Side)
+			}
+			if strings.TrimSpace(ac.AccountCode) == "" {
+				return fmt.Sprintf("amountColumns[%d].accountcode is required", i)
+			}
+			if ac.Column < 0 {
+				return fmt.Sprintf("amountColumns[%d].column must be non-negative", i)
+			}
+		}
+		return ""
+	}
+
 	if cfg.RowMode != "per-document-2-line" {
 		return ""
 	}
@@ -650,6 +692,52 @@ func buildParsedDocuments(
 				RowNum: rowNum, Docno: docno, Docdate: docdate, Row: row,
 				Lines: []rawLine{{AccountCode: accountcode, DebitAmount: debitamount, CreditAmount: creditamount, RowNum: rowNum}},
 			})
+			continue
+		}
+
+		if cfg.RowMode == "per-document-columns" {
+			// One row = one document, but instead of a single fixed debit/
+			// credit account, the account code is embedded in each amount
+			// column's header text (e.g. "D_111110" -> debit 111110,
+			// "C_410010" -> credit 410010) — already resolved client-side
+			// into cfg.AmountColumns, so this just reads each column's cell
+			// for this row. A blank cell means "no line for this account on
+			// this document," not an error — only a row where EVERY
+			// AmountColumns cell is blank is flagged, since an empty
+			// document can't be saved.
+			//
+			// Known accepted tradeoff: if two rows happen to share the same
+			// docno (e.g. a copy-paste mistake), Phase B below merges them
+			// into one document exactly like per-document-2-line mode
+			// already allows — not specially guarded here, since the same
+			// docno-grouping mechanism is a required feature for per-line
+			// mode's multi-row documents.
+			var lines []rawLine
+			for _, ac := range cfg.AmountColumns {
+				col := ac.Column
+				val := cellNumber(row, &col)
+				if val == nil {
+					continue
+				}
+				line := rawLine{AccountCode: ac.AccountCode, RowNum: rowNum}
+				// Side is validated to be exactly "debit"/"credit" in
+				// validateImportConfig before a job is ever created, so
+				// treating "not debit" as "credit" here is safe, not an
+				// unvalidated assumption.
+				if ac.Side == "debit" {
+					line.DebitAmount = *val
+				} else {
+					line.CreditAmount = *val
+				}
+				lines = append(lines, line)
+			}
+			if len(lines) == 0 {
+				issues = append(issues, ImportIssue{
+					Severity: "error", RowNumbers: []int{rowNum}, Docno: docno, Field: "amountColumns",
+					Message: "ไม่ได้ระบุจำนวนเงินในคอลัมน์เดบิตหรือเครดิตใดเลยสำหรับแถวนี้",
+				})
+			}
+			rawLines = append(rawLines, rawLineItem{RowNum: rowNum, Docno: docno, Docdate: docdate, Row: row, Lines: lines})
 			continue
 		}
 

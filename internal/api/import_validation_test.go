@@ -152,7 +152,7 @@ func TestBuildParsedDocuments_VatConflict(t *testing.T) {
 		t.Fatalf("GetOrLoadMasterData failed: %v", err)
 	}
 
-	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_vat_conflict.xlsx")
+	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_vat_conflict.xlsx", 0)
 	col := func(i int) *int { v := i; return &v }
 	cfg := ImportValidationConfig{
 		HeaderRowIndex: headerRowIndex,
@@ -209,7 +209,7 @@ func TestBuildParsedDocuments_PerDocument2Line_SignedColumn(t *testing.T) {
 		t.Fatalf("GetOrLoadMasterData failed: %v", err)
 	}
 
-	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_perdoc2line_bank.xlsx")
+	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_perdoc2line_bank.xlsx", 0)
 	col := func(i int) *int { v := i; return &v }
 	bankAccount := "111200" // เงินฝากธนาคาร — verified real account earlier this session
 	counterAccount := "410010"
@@ -291,7 +291,7 @@ func TestBuildParsedDocuments_PerDocument2Line_SameAccount(t *testing.T) {
 		t.Fatalf("GetOrLoadMasterData failed: %v", err)
 	}
 
-	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_perdoc2line_sameaccount.xlsx")
+	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_perdoc2line_sameaccount.xlsx", 0)
 	col := func(i int) *int { v := i; return &v }
 	sameAccount := "111200"
 	cfg := ImportValidationConfig{
@@ -346,7 +346,7 @@ func TestBuildParsedDocuments_MissingFields(t *testing.T) {
 		t.Fatalf("GetOrLoadMasterData failed: %v", err)
 	}
 
-	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_missing_fields.xlsx")
+	dataRows, headerRowIndex := loadTestFileDataRows(t, "/tmp/go_test_missing_fields.xlsx", 0)
 	col := func(i int) *int { v := i; return &v }
 	cfg := ImportValidationConfig{
 		HeaderRowIndex: headerRowIndex,
@@ -394,6 +394,142 @@ func TestBuildParsedDocuments_MissingFields(t *testing.T) {
 	}
 }
 
+// TestValidateImportConfig_PerDocumentColumns is a pure-function test (no
+// live DB needed) covering the input-validation guards added for the
+// "per-document-columns" rowMode. Since /billscan is an unauthenticated
+// endpoint, every AmountColumns entry must be validated rather than
+// trusted — a bad Side value in particular would otherwise silently
+// misclassify an amount to the wrong side of the ledger downstream.
+func TestValidateImportConfig_PerDocumentColumns(t *testing.T) {
+	base := func(cols []ImportAmountColumnSource) ImportValidationConfig {
+		return ImportValidationConfig{RowMode: "per-document-columns", AmountColumns: cols}
+	}
+
+	if msg := validateImportConfig(&ImportValidationConfig{RowMode: "per-document-columns", AmountColumns: nil}); msg == "" {
+		t.Error("expected an error for empty amountColumns, got none")
+	}
+
+	tooMany := make([]ImportAmountColumnSource, 201)
+	for i := range tooMany {
+		tooMany[i] = ImportAmountColumnSource{Column: i, AccountCode: "111110", Side: "debit"}
+	}
+	if msg := validateImportConfig(ref(base(tooMany))); msg == "" {
+		t.Error("expected an error for 201 amountColumns entries, got none")
+	}
+
+	if msg := validateImportConfig(ref(base([]ImportAmountColumnSource{{Column: 0, AccountCode: "111110", Side: "invalid"}}))); msg == "" {
+		t.Error("expected an error for an invalid side value, got none")
+	}
+
+	if msg := validateImportConfig(ref(base([]ImportAmountColumnSource{{Column: 0, AccountCode: "", Side: "debit"}}))); msg == "" {
+		t.Error("expected an error for an empty accountcode, got none")
+	}
+
+	if msg := validateImportConfig(ref(base([]ImportAmountColumnSource{{Column: -1, AccountCode: "111110", Side: "debit"}}))); msg == "" {
+		t.Error("expected an error for a negative column index, got none")
+	}
+
+	if msg := validateImportConfig(ref(base([]ImportAmountColumnSource{
+		{Column: 7, AccountCode: "111110", Side: "debit"},
+		{Column: 9, AccountCode: "215500", Side: "credit"},
+	}))); msg != "" {
+		t.Errorf("expected a well-formed config to pass, got error: %s", msg)
+	}
+}
+
+func ref[T any](v T) *T { return &v }
+
+// TestBuildParsedDocuments_PerDocumentColumns_TemplateJournal is a real
+// end-to-end integration check (live dev DB, not a mock) using the actual
+// hand-built SML-adjacent template a user reported needing:
+// template_journal.xlsx. Row 1 is decorative Thai labels; row 2 is the real
+// machine header containing the D_/C_-prefixed amount columns this mode
+// parses — this test deliberately selects row 2 (headerRowIndex=1), which
+// is exactly the choice the wizard's Step 2 preview table is meant to
+// guide a user toward.
+func TestBuildParsedDocuments_PerDocumentColumns_TemplateJournal(t *testing.T) {
+	shopID := setupLiveDBTest(t)
+	masterCache, err := storage.GetOrLoadMasterData(shopID)
+	if err != nil {
+		t.Fatalf("GetOrLoadMasterData failed: %v", err)
+	}
+
+	filePath := "/Users/nontawatwongnuk/dev_vue/bcaccount/public/demo/file/template_journal.xlsx"
+	dataRows, headerRowIndex := loadTestFileDataRows(t, filePath, 1)
+
+	col := func(i int) *int { v := i; return &v }
+	cfg := ImportValidationConfig{
+		HeaderRowIndex: headerRowIndex,
+		RowMode:        "per-document-columns",
+		AmountColumns: []ImportAmountColumnSource{
+			{Column: 7, AccountCode: "111110", Side: "debit"},
+			{Column: 8, AccountCode: "410090", Side: "debit"},
+			{Column: 9, AccountCode: "215500", Side: "credit"},
+			{Column: 10, AccountCode: "410010", Side: "credit"},
+		},
+		FieldMappings: map[string]*int{
+			"docno": col(0), "docdate": col(1), "bookcode": col(5), "accountdescription": col(6),
+			"vatdate": col(17), "vatdocno": col(18), "vatbase": col(21), "vatrate": col(22), "vatamount": col(23),
+		},
+	}
+
+	chartOfAccountsMap := buildStringKeyedMap(masterCache.Accounts, "accountcode")
+	journalBookMap := buildStringKeyedMap(masterCache.JournalBooks, "code")
+	accountGroupMap := buildStringKeyedMap(masterCache.AccountGroups, "code")
+	debtorMap := buildStringKeyedMap(masterCache.Debtors, "code")
+	creditorMap := buildStringKeyedMap(masterCache.Creditors, "code")
+
+	reqCtx := common.NewRequestContext(shopID)
+	job, _, err := jobs.Create(reqCtx)
+	if err != nil {
+		t.Fatalf("job create failed: %v", err)
+	}
+
+	docs, issues := buildParsedDocuments(dataRows, cfg, chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, job, time.Now().Add(time.Hour))
+
+	fmt.Printf("=== PER-DOCUMENT-COLUMNS RESULT ===\ndocuments: %d, issues: %d\n", len(docs), len(issues))
+	for _, iss := range issues {
+		fmt.Printf("  [%s] %s (docno=%s, field=%s, rows=%v)\n", iss.Severity, iss.Message, iss.Docno, iss.Field, iss.RowNumbers)
+	}
+	for _, d := range docs {
+		fmt.Printf("  doc %s: amount=%.2f bookcode=%s journaldetail=%d vats=%d\n", d.Docno, d.Amount, d.Bookcode, len(d.Journaldetail), len(d.Vats))
+	}
+
+	if len(docs) != 5 {
+		t.Fatalf("expected 5 documents, got %d", len(docs))
+	}
+	errorCount := 0
+	for _, iss := range issues {
+		if iss.Severity == "error" {
+			errorCount++
+		}
+	}
+	if errorCount != 0 {
+		t.Errorf("expected 0 error-severity issues, got %d", errorCount)
+	}
+
+	for _, d := range docs {
+		var sumDebit, sumCredit float64
+		for _, jd := range d.Journaldetail {
+			sumDebit += jd.DebitAmount
+			sumCredit += jd.CreditAmount
+		}
+		if math_Abs(sumDebit-sumCredit) > 0.01 {
+			t.Errorf("doc %s: unbalanced debit=%.2f credit=%.2f", d.Docno, sumDebit, sumCredit)
+		}
+	}
+
+	// Row 3 in the source file (JO-2025110001) has a blank D_410090 cell —
+	// confirms the blank-cell-skip path produces 3 lines, not 4.
+	for _, d := range docs {
+		if d.Docno == "JO-2025110001" {
+			if len(d.Journaldetail) != 3 {
+				t.Errorf("JO-2025110001: expected 3 journaldetail lines (blank D_410090 skipped), got %d: %+v", len(d.Journaldetail), d.Journaldetail)
+			}
+		}
+	}
+}
+
 // ---------- test helpers ----------
 
 func setupLiveDBTest(t *testing.T) string {
@@ -411,7 +547,7 @@ func setupLiveDBTest(t *testing.T) string {
 	return "36xq3C3RKkSrkcCJNj6lnjfBl6Z"
 }
 
-func loadTestFileDataRows(t *testing.T, path string) ([][]string, int) {
+func loadTestFileDataRows(t *testing.T, path string, headerRowIndex int) ([][]string, int) {
 	t.Helper()
 	f, err := excelize.OpenFile(path, excelize.Options{RawCellValue: true})
 	if err != nil {
@@ -432,7 +568,6 @@ func loadTestFileDataRows(t *testing.T, path string) ([][]string, int) {
 		}
 		allRows = append(allRows, cols)
 	}
-	headerRowIndex := 0
 	var dataRows [][]string
 	for _, r := range allRows[headerRowIndex+1:] {
 		if rowHasAnyValue(r) {
