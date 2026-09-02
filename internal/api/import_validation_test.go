@@ -439,6 +439,114 @@ func TestValidateImportConfig_PerDocumentColumns(t *testing.T) {
 
 func ref[T any](v T) *T { return &v }
 
+// TestValidateImportConfig_VatWhtClassification covers the required-when-
+// applicable VAT/WHT classification fields restored by this change (see
+// validateVatClassification/validateWhtClassification) — these replace the
+// old fixed-Excel-header VATTYPE/VATMODE/CUSTTYPE/WHTMODE columns that were
+// silently dropped (defaulting to 0) when this importer moved to the
+// column-mapping wizard + Go backend job.
+func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
+	withVatCol := func(cfg ImportValidationConfig) ImportValidationConfig {
+		cfg.RowMode = "per-line"
+		cfg.FieldMappings = map[string]*int{"vatdocno": ref(0)}
+		return cfg
+	}
+	withWhtCol := func(cfg ImportValidationConfig) ImportValidationConfig {
+		cfg.RowMode = "per-line"
+		cfg.FieldMappings = map[string]*int{"taxdocno": ref(0)}
+		return cfg
+	}
+
+	// No vatdocno/taxdocno mapped at all — classification fields aren't
+	// required, matching a plain per-line import with no VAT/WHT data.
+	if msg := validateImportConfig(&ImportValidationConfig{RowMode: "per-line"}); msg != "" {
+		t.Errorf("expected no VAT/WHT requirement without vatdocno/taxdocno mapped, got error: %s", msg)
+	}
+
+	// vatdocno mapped but classification fields missing entirely.
+	cfg := withVatCol(ImportValidationConfig{})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error when vatdocno is mapped but vatMode/vatType/vatOrganization are unset")
+	}
+
+	// vatMode out of range.
+	cfg = withVatCol(ImportValidationConfig{VatMode: ref(2), VatType: ref(0), VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for vatMode=2 (must be 0 or 1)")
+	}
+
+	// vatType out of range for vatMode=0 (ภาษีซื้อ allows 0-2).
+	cfg = withVatCol(ImportValidationConfig{VatMode: ref(0), VatType: ref(3), VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for vatType=3 when vatMode=0 (only 0-2 valid)")
+	}
+
+	// vatType valid for vatMode=0 but not for vatMode=1 (ภาษีขาย allows 0-1
+	// only) — the range genuinely depends on vatMode, not a single fixed set.
+	cfg = withVatCol(ImportValidationConfig{VatMode: ref(1), VatType: ref(2), VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for vatType=2 when vatMode=1 (only 0-1 valid, unlike vatMode=0)")
+	}
+
+	// vatOrganization out of range.
+	cfg = withVatCol(ImportValidationConfig{VatMode: ref(0), VatType: ref(0), VatOrganization: ref(5)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for vatOrganization=5 (must be 0 or 1)")
+	}
+
+	// Fully valid VAT classification, both vatMode branches.
+	cfg = withVatCol(ImportValidationConfig{VatMode: ref(0), VatType: ref(2), VatOrganization: ref(1)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected a well-formed vatMode=0 config to pass, got error: %s", msg)
+	}
+	cfg = withVatCol(ImportValidationConfig{VatMode: ref(1), VatType: ref(1), VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected a well-formed vatMode=1 config to pass, got error: %s", msg)
+	}
+
+	// taxdocno mapped but classification fields missing entirely.
+	cfg = withWhtCol(ImportValidationConfig{})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error when taxdocno is mapped but whtTaxType/whtCustType are unset")
+	}
+
+	// whtTaxType out of range.
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(2), WhtCustType: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for whtTaxType=2 (must be 0 or 1)")
+	}
+
+	// whtCustType out of range.
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(0), WhtCustType: ref(5)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for whtCustType=5 (must be 0-4)")
+	}
+
+	// whtConditionType provided but whtTaxType != 1 — only meaningful for
+	// whtTaxType=1 (หัก ณ ที่จ่าย), mirrors the frontend's display-side
+	// v-if="tax.taxtype === 1" gating.
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(0), WhtCustType: ref(0), WhtConditionType: ref(1)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for whtConditionType set when whtTaxType is not 1")
+	}
+
+	// whtConditionType out of range even when whtTaxType=1.
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(1), WhtCustType: ref(0), WhtConditionType: ref(9)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected an error for whtConditionType=9 (must be 1-3)")
+	}
+
+	// Fully valid WHT classification, with and without whtConditionType.
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(0), WhtCustType: ref(4)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected a well-formed whtTaxType=0 config (no conditionType) to pass, got error: %s", msg)
+	}
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(1), WhtCustType: ref(2), WhtConditionType: ref(3)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected a well-formed whtTaxType=1 config with conditionType to pass, got error: %s", msg)
+	}
+}
+
 // TestBuildParsedDocuments_PerDocumentColumns_TemplateJournal is a real
 // end-to-end integration check (live dev DB, not a mock) using the actual
 // hand-built SML-adjacent template a user reported needing:

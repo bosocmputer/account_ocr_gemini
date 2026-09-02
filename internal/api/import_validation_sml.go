@@ -508,6 +508,22 @@ func parseSmlVatReport(rows [][]string) []smlVatRecord {
 
 // ---------- Document building ----------
 
+// This pipeline exists solely to import SML ERP's "รายงานภาษีขาย" (Sale VAT
+// report) — confirmed with the user this is always Sale VAT, never Purchase
+// or WHT (WHT is never built here at all — see Taxes: []ImportTax{} below).
+// Unlike the generic column-mapping importer (import_validation.go), there's
+// no per-batch ambiguity to ask the user about, so these are hardcoded
+// constants rather than wizard-level config: VatMode=1 (ภาษีขาย), VatType=0
+// (ปกติ — the common case), Organization=0 (สำนักงานใหญ่ — the common case).
+// If a future SML customer needs Purchase VAT, WHT, a branch, or a non-ปกติ
+// vattype through this pipeline, that's a new requirement to confirm with
+// the user, not something to guess into these constants.
+const (
+	smlVatMode      = 1 // ภาษีขาย
+	smlVatType      = 0 // ปกติ
+	smlOrganization = 0 // สำนักงานใหญ่
+)
+
 // buildSmlSalesDocument validates one parsed document group and builds its
 // ImportDocument. Debtor/creditor are always left empty for this file
 // type — the source file carries no code, only a customer name embedded in
@@ -624,6 +640,7 @@ func buildSmlSalesDocument(
 				VatAmount:  vatLineCredit, // file 1 (journal) is authoritative per confirmed decision
 				CustName:   vatRec.CustName,
 				BranchCode: "00000",
+				VatMode:    smlVatMode, VatType: smlVatType, Organization: smlOrganization,
 			}
 		} else {
 			vatEntry = ImportVat{
@@ -633,6 +650,7 @@ func buildSmlSalesDocument(
 				VatAmount:  vatLineCredit,
 				CustName:   "",
 				BranchCode: "00000",
+				VatMode:    smlVatMode, VatType: smlVatType, Organization: smlOrganization,
 			}
 		}
 		if docdate != "" {

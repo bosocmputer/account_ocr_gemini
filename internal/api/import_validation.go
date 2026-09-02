@@ -76,6 +76,20 @@ type ImportValidationConfig struct {
 	CreditAmountColumn *int                       `json:"creditAmountColumn"`
 	AmountColumns      []ImportAmountColumnSource `json:"amountColumns"` // "per-document-columns" only
 	FieldMappings      map[string]*int            `json:"fieldMappings"`
+
+	// Wizard-level VAT/WHT classification — one value for the whole import
+	// batch, not per-row column mapping (restores fields dropped when this
+	// importer moved off the old fixed-Excel-header VATTYPE/VATMODE/
+	// CUSTTYPE/WHTMODE columns). Required only when the batch actually
+	// carries VAT/WHT data (FieldMappings["vatdocno"]/["taxdocno"] set) —
+	// see validateImportConfig. nil means "not provided", distinct from a
+	// real 0 value, same as SignedAmountColumn above.
+	VatMode          *int `json:"vatMode"`          // 0=ภาษีซื้อ, 1=ภาษีขาย
+	VatType          *int `json:"vatType"`          // range depends on VatMode — see validateImportConfig
+	VatOrganization  *int `json:"vatOrganization"`  // 0=สำนักงานใหญ่, 1=สาขา
+	WhtTaxType       *int `json:"whtTaxType"`       // 0=ถูกหัก ณ ที่จ่าย, 1=หัก ณ ที่จ่าย
+	WhtCustType      *int `json:"whtCustType"`      // 0-4, customer/WHT-form type
+	WhtConditionType *int `json:"whtConditionType"` // 1-3, only meaningful when WhtTaxType == 1
 }
 
 // ImportIssue mirrors the JS `issues` array entries exactly.
@@ -285,6 +299,20 @@ func validateImportConfig(cfg *ImportValidationConfig) string {
 		return "rowMode must be 'per-line', 'per-document-2-line', or 'per-document-columns'"
 	}
 
+	// VAT/WHT classification — applies regardless of rowMode, so it's
+	// checked before the rowMode-specific branches below rather than inside
+	// any one of them. Same unauthenticated-endpoint defense-in-depth
+	// posture as the AmountColumns check further down: every enum value is
+	// whitelisted against its real valid range, not trusted as-is, since an
+	// out-of-range value would otherwise silently misclassify a document
+	// into the wrong tax report (this is the exact bug being fixed here).
+	if vatErr := validateVatClassification(cfg); vatErr != "" {
+		return vatErr
+	}
+	if whtErr := validateWhtClassification(cfg); whtErr != "" {
+		return whtErr
+	}
+
 	if cfg.RowMode == "per-document-columns" {
 		// AmountColumns is a JSON-decoded slice arriving over an
 		// unauthenticated endpoint (see this file's own header comment on
@@ -329,6 +357,69 @@ func validateImportConfig(cfg *ImportValidationConfig) string {
 	}
 	if !amountOk {
 		return "amount column configuration is incomplete"
+	}
+	return ""
+}
+
+// validateVatClassification checks VatMode/VatType/VatOrganization: required
+// together when the batch is mapped to carry VAT data (fieldMappings has a
+// vatdocno column), each whitelisted against its real valid range. VatType's
+// valid range depends on VatMode (mirrors JournalTaxInfoTab.vue's
+// getVatTypeOptions(vatmode) on the frontend) — vatmode=0 (ภาษีซื้อ) allows
+// {0,1,2}, vatmode=1 (ภาษีขาย) allows {0,1}.
+func validateVatClassification(cfg *ImportValidationConfig) string {
+	hasVatColumn := cfg.FieldMappings["vatdocno"] != nil
+	if !hasVatColumn {
+		return ""
+	}
+	if cfg.VatMode == nil || cfg.VatType == nil || cfg.VatOrganization == nil {
+		return "vatMode, vatType, and vatOrganization are required when a vatdocno column is mapped"
+	}
+	if *cfg.VatMode != 0 && *cfg.VatMode != 1 {
+		return fmt.Sprintf("vatMode must be 0 or 1, got %d", *cfg.VatMode)
+	}
+	if *cfg.VatMode == 0 {
+		if *cfg.VatType < 0 || *cfg.VatType > 2 {
+			return fmt.Sprintf("vatType must be 0-2 when vatMode is 0 (ภาษีซื้อ), got %d", *cfg.VatType)
+		}
+	} else {
+		if *cfg.VatType < 0 || *cfg.VatType > 1 {
+			return fmt.Sprintf("vatType must be 0-1 when vatMode is 1 (ภาษีขาย), got %d", *cfg.VatType)
+		}
+	}
+	if *cfg.VatOrganization != 0 && *cfg.VatOrganization != 1 {
+		return fmt.Sprintf("vatOrganization must be 0 or 1, got %d", *cfg.VatOrganization)
+	}
+	return ""
+}
+
+// validateWhtClassification checks WhtTaxType/WhtCustType/WhtConditionType:
+// the first two required together when the batch is mapped to carry WHT
+// data (fieldMappings has a taxdocno column); WhtConditionType is only
+// meaningful when WhtTaxType is 1 (หัก ณ ที่จ่าย) — mirrors the display-side
+// gating in JournalDetailPanel.vue (`v-if="tax.taxtype === 1"` around its
+// conditiontaxtype tag).
+func validateWhtClassification(cfg *ImportValidationConfig) string {
+	hasWhtColumn := cfg.FieldMappings["taxdocno"] != nil
+	if !hasWhtColumn {
+		return ""
+	}
+	if cfg.WhtTaxType == nil || cfg.WhtCustType == nil {
+		return "whtTaxType and whtCustType are required when a taxdocno column is mapped"
+	}
+	if *cfg.WhtTaxType != 0 && *cfg.WhtTaxType != 1 {
+		return fmt.Sprintf("whtTaxType must be 0 or 1, got %d", *cfg.WhtTaxType)
+	}
+	if *cfg.WhtCustType < 0 || *cfg.WhtCustType > 4 {
+		return fmt.Sprintf("whtCustType must be 0-4, got %d", *cfg.WhtCustType)
+	}
+	if cfg.WhtConditionType != nil {
+		if *cfg.WhtTaxType != 1 {
+			return "whtConditionType is only valid when whtTaxType is 1"
+		}
+		if *cfg.WhtConditionType < 1 || *cfg.WhtConditionType > 3 {
+			return fmt.Sprintf("whtConditionType must be 1-3, got %d", *cfg.WhtConditionType)
+		}
 	}
 	return ""
 }
@@ -1083,13 +1174,28 @@ func buildParsedDocuments(
 					vatyear = t.Year() + 543
 				}
 			}
+			branchcodeField := collectRowLevelField(g.SourceRows, "branchcode", false)
+			branchcode := branchcodeField.Value
+			if branchcode == "" {
+				branchcode = "00000"
+			}
+			vatsubmitField := collectRowLevelField(g.SourceRows, "vatsubmit", false)
+			vatsubmit := vatsubmitField.Value == "1" || strings.EqualFold(vatsubmitField.Value, "true")
+
+			// VatMode/VatType/VatOrganization are wizard-level (constant for the
+			// whole batch), not per-row — the HTTP handler path always has
+			// these validated/required by validateImportConfig before reaching
+			// here, but buildParsedDocuments is also called directly (e.g. from
+			// tests) without going through that gate, so default to 0 rather
+			// than deref a possibly-nil pointer — same defensive posture as
+			// numOrZeroField for the other optional numeric fields in this func.
 			vats = []ImportVat{{
-				VatDocNo: vatdocno, VatType: 0, VatDate: vatdate, VatPeriod: vatperiod, VatYear: vatyear,
+				VatDocNo: vatdocno, VatType: intOrZero(cfg.VatType), VatDate: vatdate, VatPeriod: vatperiod, VatYear: vatyear,
 				VatBase: numOrZeroField(vatbaseField), VatRate: numOrZeroField(vatrateField), VatAmount: numOrZeroField(vatamountField),
-				ExceptVat: 0, VatMode: 0, VatSubmit: false, CustCode: "",
+				ExceptVat: int(numOrZeroField(collectRowLevelField(g.SourceRows, "exceptvat", true))), VatMode: intOrZero(cfg.VatMode), VatSubmit: vatsubmit, CustCode: "",
 				CustName:     collectRowLevelField(g.SourceRows, "custname", false).Value,
 				CustTaxID:    collectRowLevelField(g.SourceRows, "custtaxid", false).Value,
-				Organization: 0, BranchCode: "00000", Remark: "",
+				Organization: intOrZero(cfg.VatOrganization), BranchCode: branchcode, Remark: "",
 			}}
 		}
 
@@ -1130,12 +1236,15 @@ func buildParsedDocuments(
 			}
 
 			whtamount := numOrZeroField(whtamountField)
+			// WhtCustType/WhtTaxType/WhtConditionType are wizard-level (constant
+			// for the whole batch), not per-row — see the VAT block's comment
+			// above for why intOrZero (not a raw deref) is used here too.
 			taxes = []ImportTax{{
 				TaxDocNo: taxdocno, TaxDate: taxdateField.Value,
 				CustName:  collectRowLevelField(g.SourceRows, "custname", false).Value,
-				CustType:  0,
+				CustType:  intOrZero(cfg.WhtCustType),
 				CustTaxID: collectRowLevelField(g.SourceRows, "custtaxid", false).Value,
-				TaxType:   0, ConditionTaxType: 0, Address: "",
+				TaxType:   intOrZero(cfg.WhtTaxType), ConditionTaxType: intOrZero(cfg.WhtConditionType), Address: collectRowLevelField(g.SourceRows, "address", false).Value,
 				TaxAmount: whtamount,
 				Details: []ImportWhtDetail{{
 					Description: whtdescField.Value, TaxBase: numOrZeroField(whtbaseField), TaxRate: numOrZeroField(whtrateField), TaxAmount: whtamount,
@@ -1170,6 +1279,18 @@ func numOrZeroField(f collectedField) float64 {
 		return 0
 	}
 	return *f.NumberValue
+}
+
+// intOrZero dereferences an optional *int config field, defaulting to 0 when
+// nil — used for the wizard-level VAT/WHT classification fields, which the
+// HTTP handler path always has validated/required (non-nil) by
+// validateImportConfig before buildParsedDocuments runs, but this function
+// is also called directly (e.g. from tests) without going through that gate.
+func intOrZero(v *int) int {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 func joinInts(nums []int) string {

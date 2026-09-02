@@ -298,6 +298,22 @@ func TestBuildSmlSalesDocument_EndToEnd(t *testing.T) {
 		}
 		if len(doc.Vats) != 1 {
 			t.Errorf("doc %s: expected exactly 1 vats[] entry, got %d", doc.Docno, len(doc.Vats))
+		} else {
+			// This pipeline only ever imports ภาษีขาย (Sale VAT) — confirmed
+			// with the user, hardcoded as smlVatMode/smlVatType/smlOrganization
+			// rather than left at the Go zero-value (0), which used to silently
+			// misclassify every SML import as ภาษีซื้อ (Purchase) — same root
+			// cause as the bug fixed in the generic importer.
+			v := doc.Vats[0]
+			if v.VatMode != 1 {
+				t.Errorf("doc %s: expected VatMode=1 (ภาษีขาย), got %d", doc.Docno, v.VatMode)
+			}
+			if v.VatType != 0 {
+				t.Errorf("doc %s: expected VatType=0 (ปกติ), got %d", doc.Docno, v.VatType)
+			}
+			if v.Organization != 0 {
+				t.Errorf("doc %s: expected Organization=0 (สำนักงานใหญ่), got %d", doc.Docno, v.Organization)
+			}
 		}
 		if doc.Taxes == nil || len(doc.Taxes) != 0 {
 			t.Errorf("doc %s: expected Taxes to be an empty non-nil slice, got %v", doc.Docno, doc.Taxes)
