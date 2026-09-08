@@ -174,7 +174,8 @@ curl -X POST http://localhost:8080/api/v1/analyze-receipt \
 - 🏗️ [System Design](docs/SYSTEM_DESIGN.md) - สถาปัตยกรรมและ flow การทำงาน
 - 📖 [Model Configuration](docs/MODEL_CONFIGURATION.md) - Phase-specific models และ pricing
 - 📄 [PDF Support](PDF_SUPPORT.md) - คู่มือรองรับไฟล์ PDF
-- 🐳 [Docker Deployment](docs/DOCKER_DEPLOY.md) - การ deploy ด้วย Docker
+- 🐳 [Docker Deployment](docs/DOCKER_DEPLOY.md) - การ deploy ด้วย Docker (คู่มือทั่วไป)
+- 🖥️ [Production Deploy Runbook](docs/PRODUCTION_DEPLOY.md) - ขั้นตอน deploy จริงบน server smldev (IP, path, credentials, verify)
 - ⚡ [Rate Limiting](docs/RATE_LIMITING_SOLUTIONS.md) - แก้ปัญหา API rate limit
 
 ---
