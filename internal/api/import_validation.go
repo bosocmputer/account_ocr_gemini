@@ -368,13 +368,13 @@ func validateImportConfig(cfg *ImportValidationConfig) string {
 // getVatTypeOptions(vatmode) on the frontend) — vatmode=0 (ภาษีซื้อ) allows
 // {0,1,2}, vatmode=1 (ภาษีขาย) allows {0,1}.
 //
-// VatMode/VatType (unlike VatOrganization) can alternatively come from a
-// mapped "vatmode"/"vattype" column instead of this wizard-level value — in
-// that case the real per-row value isn't known until buildParsedDocuments
-// scans the source rows, so the wizard-level requirement/range-check for
-// that one field is skipped here; buildParsedDocumentsVat below re-validates
-// the actual resolved value per document instead, so a bad per-row cell
-// still can't silently default to 0.
+// Each of VatMode/VatType/VatOrganization can alternatively come from a
+// mapped "vatmode"/"vattype"/"vatorganization" column instead of this
+// wizard-level value — in that case the real per-row value isn't known until
+// buildParsedDocuments scans the source rows, so the wizard-level
+// requirement/range-check for that one field is skipped here;
+// buildParsedDocuments re-validates the actual resolved value per document
+// instead, so a bad per-row cell still can't silently default to 0.
 func validateVatClassification(cfg *ImportValidationConfig) string {
 	hasVatColumn := cfg.FieldMappings["vatdocno"] != nil
 	if !hasVatColumn {
@@ -382,8 +382,9 @@ func validateVatClassification(cfg *ImportValidationConfig) string {
 	}
 	hasVatModeColumn := cfg.FieldMappings["vatmode"] != nil
 	hasVatTypeColumn := cfg.FieldMappings["vattype"] != nil
-	if cfg.VatOrganization == nil {
-		return "vatOrganization is required when a vatdocno column is mapped"
+	hasVatOrganizationColumn := cfg.FieldMappings["vatorganization"] != nil
+	if !hasVatOrganizationColumn && cfg.VatOrganization == nil {
+		return "vatOrganization is required when a vatdocno column is mapped and no vatorganization column is mapped"
 	}
 	if !hasVatModeColumn && cfg.VatMode == nil {
 		return "vatMode is required when a vatdocno column is mapped and no vatmode column is mapped"
@@ -407,8 +408,10 @@ func validateVatClassification(cfg *ImportValidationConfig) string {
 			}
 		}
 	}
-	if *cfg.VatOrganization != 0 && *cfg.VatOrganization != 1 {
-		return fmt.Sprintf("vatOrganization must be 0 or 1, got %d", *cfg.VatOrganization)
+	if !hasVatOrganizationColumn {
+		if *cfg.VatOrganization != 0 && *cfg.VatOrganization != 1 {
+			return fmt.Sprintf("vatOrganization must be 0 or 1, got %d", *cfg.VatOrganization)
+		}
 	}
 	return ""
 }
@@ -1202,24 +1205,21 @@ func buildParsedDocuments(
 			vatsubmitField := collectRowLevelField(g.SourceRows, "vatsubmit", false)
 			vatsubmit := vatsubmitField.Value == "1" || strings.EqualFold(vatsubmitField.Value, "true")
 
-			// VatOrganization is wizard-level only (constant for the whole
-			// batch) — the HTTP handler path always has it validated/required
-			// by validateImportConfig before reaching here, but
-			// buildParsedDocuments is also called directly (e.g. from tests)
-			// without going through that gate, so default to 0 rather than
-			// deref a possibly-nil pointer — same defensive posture as
-			// numOrZeroField for the other optional numeric fields in this func.
-			//
-			// VatMode/VatType, unlike VatOrganization, can additionally come
-			// from a mapped column per row (e.g. a source file that already
-			// carries its own VATMODE/VATTYPE columns per line) — the mapped
-			// column wins when the row has a value, falling back to the
-			// wizard-level cfg value when that row's cell is blank/unmapped.
-			// Expects the same numeric codes the wizard-level SelectButton
-			// uses (vatmode 0/1, vattype 0-2 or 0-1 depending on vatmode),
-			// not free text.
+			// VatMode/VatType/VatOrganization can each additionally come from
+			// a mapped column per row (e.g. a source file that already
+			// carries its own VATMODE/VATTYPE/ORGTYPE columns per line) — the
+			// mapped column wins when the row has a value, falling back to
+			// the wizard-level cfg value (defaulting to 0 when that's also
+			// unset — buildParsedDocuments is called directly from tests
+			// without going through validateImportConfig's non-nil gate, same
+			// defensive posture as numOrZeroField for the other optional
+			// numeric fields in this func) when that row's cell is
+			// blank/unmapped. Expects the same numeric codes the wizard-level
+			// SelectButtons use (vatmode 0/1, vattype 0-2 or 0-1 depending on
+			// vatmode, vatorganization 0/1), not free text.
 			vatModeField := collectRowLevelField(g.SourceRows, "vatmode", true)
 			vatTypeField := collectRowLevelField(g.SourceRows, "vattype", true)
+			vatOrganizationField := collectRowLevelField(g.SourceRows, "vatorganization", true)
 			vatMode := intOrZero(cfg.VatMode)
 			if vatModeField.HasValue {
 				vatMode = int(numOrZeroField(vatModeField))
@@ -1228,28 +1228,39 @@ func buildParsedDocuments(
 			if vatTypeField.HasValue {
 				vatType = int(numOrZeroField(vatTypeField))
 			}
+			vatOrganization := intOrZero(cfg.VatOrganization)
+			if vatOrganizationField.HasValue {
+				vatOrganization = int(numOrZeroField(vatOrganizationField))
+			}
 			if vatModeField.HasConflict {
 				issues = append(issues, ImportIssue{Severity: "warning", RowNumbers: vatModeField.RowNums, Docno: docno, Field: "vatmode", Message: fmt.Sprintf("ภาษีซื้อ/ภาษีขายไม่ตรงกันหลายแถว จะใช้ค่าจากแถวที่ %d", vatModeField.RowNums[0])})
 			}
 			if vatTypeField.HasConflict {
 				issues = append(issues, ImportIssue{Severity: "warning", RowNumbers: vatTypeField.RowNums, Docno: docno, Field: "vattype", Message: fmt.Sprintf("ประเภทภาษีไม่ตรงกันหลายแถว จะใช้ค่าจากแถวที่ %d", vatTypeField.RowNums[0])})
 			}
-			// A per-row vatmode/vattype value that falls outside the same
-			// range the wizard-level SelectButton enforces (e.g. a stray "2"
-			// in a VATMODE column that should only ever be 0/1) is exactly
-			// the silent-misclassification failure mode this whole
-			// classification requirement exists to prevent — surface it as a
-			// blocking error rather than saving a document into the wrong
-			// VAT report bucket. Falls back to g.RowNums (the whole document)
-			// when the bad value came from the wizard-level config rather
-			// than a specific mapped-column cell, since vatModeField/
-			// vatTypeField.RowNums is empty in that case.
-			vatModeRowNums, vatTypeRowNums := vatModeField.RowNums, vatTypeField.RowNums
+			if vatOrganizationField.HasConflict {
+				issues = append(issues, ImportIssue{Severity: "warning", RowNumbers: vatOrganizationField.RowNums, Docno: docno, Field: "vatorganization", Message: fmt.Sprintf("สำนักงานใหญ่/สาขาไม่ตรงกันหลายแถว จะใช้ค่าจากแถวที่ %d", vatOrganizationField.RowNums[0])})
+			}
+			// A per-row vatmode/vattype/vatorganization value that falls
+			// outside the same range the wizard-level SelectButton enforces
+			// (e.g. a stray "2" in a VATMODE column that should only ever be
+			// 0/1) is exactly the silent-misclassification failure mode this
+			// whole classification requirement exists to prevent — surface it
+			// as a blocking error rather than saving a document into the
+			// wrong VAT report bucket. Falls back to g.RowNums (the whole
+			// document) when the bad value came from the wizard-level config
+			// rather than a specific mapped-column cell, since
+			// vatModeField/vatTypeField/vatOrganizationField.RowNums is empty
+			// in that case.
+			vatModeRowNums, vatTypeRowNums, vatOrganizationRowNums := vatModeField.RowNums, vatTypeField.RowNums, vatOrganizationField.RowNums
 			if len(vatModeRowNums) == 0 {
 				vatModeRowNums = g.RowNums
 			}
 			if len(vatTypeRowNums) == 0 {
 				vatTypeRowNums = g.RowNums
+			}
+			if len(vatOrganizationRowNums) == 0 {
+				vatOrganizationRowNums = g.RowNums
 			}
 			if vatMode != 0 && vatMode != 1 {
 				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: vatModeRowNums, Docno: docno, Field: "vatmode", Message: fmt.Sprintf("ภาษีซื้อ/ภาษีขายต้องเป็น 0 หรือ 1 แต่พบ %d", vatMode)})
@@ -1258,6 +1269,9 @@ func buildParsedDocuments(
 			} else if vatMode == 1 && (vatType < 0 || vatType > 1) {
 				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: vatTypeRowNums, Docno: docno, Field: "vattype", Message: fmt.Sprintf("ประเภทภาษีต้องเป็น 0-1 เมื่อเป็นภาษีขาย แต่พบ %d", vatType)})
 			}
+			if vatOrganization != 0 && vatOrganization != 1 {
+				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: vatOrganizationRowNums, Docno: docno, Field: "vatorganization", Message: fmt.Sprintf("สำนักงานใหญ่/สาขาต้องเป็น 0 หรือ 1 แต่พบ %d", vatOrganization)})
+			}
 
 			vats = []ImportVat{{
 				VatDocNo: vatdocno, VatType: vatType, VatDate: vatdate, VatPeriod: vatperiod, VatYear: vatyear,
@@ -1265,7 +1279,7 @@ func buildParsedDocuments(
 				ExceptVat: int(numOrZeroField(collectRowLevelField(g.SourceRows, "exceptvat", true))), VatMode: vatMode, VatSubmit: vatsubmit, CustCode: "",
 				CustName:     collectRowLevelField(g.SourceRows, "custname", false).Value,
 				CustTaxID:    collectRowLevelField(g.SourceRows, "custtaxid", false).Value,
-				Organization: intOrZero(cfg.VatOrganization), BranchCode: branchcode, Remark: "",
+				Organization: vatOrganization, BranchCode: branchcode, Remark: "",
 			}}
 		}
 

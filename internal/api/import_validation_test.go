@@ -504,6 +504,70 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 		t.Errorf("expected a well-formed vatMode=1 config to pass, got error: %s", msg)
 	}
 
+	// vatmode/vattype/vatorganization can each be sourced from a mapped
+	// column instead of this wizard-level value — mapping any one of them
+	// should relax exactly that field's requirement/range-check, not the
+	// other two.
+	withVatModeCol := func(cfg ImportValidationConfig) ImportValidationConfig {
+		cfg = withVatCol(cfg)
+		cfg.FieldMappings["vatmode"] = ref(0)
+		return cfg
+	}
+	withVatTypeCol := func(cfg ImportValidationConfig) ImportValidationConfig {
+		cfg = withVatCol(cfg)
+		cfg.FieldMappings["vattype"] = ref(0)
+		return cfg
+	}
+	withVatOrganizationCol := func(cfg ImportValidationConfig) ImportValidationConfig {
+		cfg = withVatCol(cfg)
+		cfg.FieldMappings["vatorganization"] = ref(0)
+		return cfg
+	}
+
+	// vatmode column mapped: vatType/vatOrganization still required, vatMode
+	// is not, and an out-of-range vatMode value that WOULD have been used is
+	// no longer even inspected (the mapped column is now the source of truth).
+	cfg = withVatModeCol(ImportValidationConfig{VatType: ref(0), VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected vatMode to not be required when a vatmode column is mapped, got error: %s", msg)
+	}
+	cfg = withVatModeCol(ImportValidationConfig{VatType: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected vatOrganization to still be required even with a vatmode column mapped")
+	}
+
+	// vattype column mapped: vatMode/vatOrganization still required, vatType
+	// is not — and critically, vatMode alone (without vatType) is no longer
+	// range-checked against it either, since the real vatType only becomes
+	// known per row.
+	cfg = withVatTypeCol(ImportValidationConfig{VatMode: ref(0), VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected vatType to not be required when a vattype column is mapped, got error: %s", msg)
+	}
+	cfg = withVatTypeCol(ImportValidationConfig{VatOrganization: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected vatMode to still be required even with a vattype column mapped")
+	}
+
+	// vatorganization column mapped: vatMode/vatType still required,
+	// vatOrganization is not.
+	cfg = withVatOrganizationCol(ImportValidationConfig{VatMode: ref(0), VatType: ref(0)})
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected vatOrganization to not be required when a vatorganization column is mapped, got error: %s", msg)
+	}
+	cfg = withVatOrganizationCol(ImportValidationConfig{VatMode: ref(0)})
+	if msg := validateImportConfig(&cfg); msg == "" {
+		t.Error("expected vatType to still be required even with a vatorganization column mapped")
+	}
+
+	// All three mapped at once — nothing wizard-level required at all.
+	cfg = withVatModeCol(ImportValidationConfig{})
+	cfg.FieldMappings["vattype"] = ref(0)
+	cfg.FieldMappings["vatorganization"] = ref(0)
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected no wizard-level VAT fields required when vatmode/vattype/vatorganization are all mapped, got error: %s", msg)
+	}
+
 	// taxdocno mapped but classification fields missing entirely.
 	cfg = withWhtCol(ImportValidationConfig{})
 	if msg := validateImportConfig(&cfg); msg == "" {
