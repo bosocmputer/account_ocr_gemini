@@ -212,6 +212,45 @@ func runBatch(batchID string) {
 		})
 	}
 
+	// Shared snapshot of which documents have since been analyzed or saved
+	// by someone else, refreshed on the RecheckIntervalItems cadence rather
+	// than per item (documentImageGroups has no index beyond _id_, so each
+	// refresh is a full collection scan — one per 10 documents instead of
+	// one per document).
+	//
+	// This is purely a cost optimization, NOT the race guard: the real,
+	// atomic guard is the $or filter inside storage.SetGroupOcrAnalyzeAI,
+	// which cannot write over a result someone else already produced. What
+	// this buys is not paying Gemini/Mistral to analyze a document we could
+	// have known was already done — without it, a user manually analyzing a
+	// document that's queued behind a running batch means the batch pays
+	// full price for that document and then throws the answer away.
+	var eligibilityMu sync.RWMutex
+	eligibility := make(map[string]storage.DocumentImageGroupRef)
+
+	refreshEligibility := func() {
+		states, err := storage.RefreshGroupStates(run.ShopID, run.TaskGuid, itemGuids)
+		if err != nil {
+			// Non-fatal: on failure we simply don't skip anything this
+			// round and fall back to SetGroupOcrAnalyzeAI's own guard.
+			log.Printf("[batch %s] eligibility refresh failed (continuing without it): %v", batchID, err)
+			return
+		}
+		eligibilityMu.Lock()
+		eligibility = states
+		eligibilityMu.Unlock()
+	}
+
+	alreadyHandled := func(guidfixed string) bool {
+		eligibilityMu.RLock()
+		defer eligibilityMu.RUnlock()
+		g, ok := eligibility[guidfixed]
+		if !ok {
+			return false // not in the snapshot (or refresh failed) — let it through
+		}
+		return g.HasOcrResult() || g.IsAlreadyRecorded()
+	}
+
 	for w := 0; w < concurrency; w++ {
 		wg.Add(1)
 		go func() {
@@ -228,16 +267,37 @@ func runBatch(batchID string) {
 				n := processedCount
 				countMu.Unlock()
 
+				// Cancel is checked before EVERY item, not on the 10-item
+				// cadence below: it's an indexed point lookup on our own
+				// batch_ocr_runs collection (unique batchid index), so it
+				// costs nothing worth batching — and a user who presses
+				// "ยกเลิก" and then watches up to 10 more documents get
+				// read anyway (~2-3 minutes, and real money per document)
+				// would reasonably conclude the button is broken.
+				if cancelled, _ := IsCancelRequested(batchID); cancelled {
+					triggerStop("user_requested")
+					return
+				}
+
+				// Task-status and eligibility both stay on the 10-item
+				// cadence: unlike the cancel flag, these query collections
+				// owned by another team (and documentImageGroups has no
+				// usable index), so they're deliberately batched.
 				if n%RecheckIntervalItems == 1 { // check on the 1st, 11th, 21st... item of this run
-					if cancelled, _ := IsCancelRequested(batchID); cancelled {
-						triggerStop("user_requested")
-						return
-					}
 					if isOpen, checked, err := activeChecker(run.ShopID, run.TaskGuid); checked && err == nil && !isOpen {
 						log.Printf("[batch %s] task closed mid-run — stopping", batchID)
 						triggerStop("task_closed")
 						return
 					}
+					refreshEligibility()
+				}
+
+				// Skip without paying for AI if someone analyzed or saved
+				// this document while it sat in our queue.
+				if alreadyHandled(guidfixed) {
+					_ = MarkItemSkipped(batchID, guidfixed)
+					log.Printf("[batch %s] item %s → skipped (pre-check) already analyzed or saved by someone else", batchID, guidfixed)
+					continue
 				}
 
 				processItem(batchID, run.ShopID, run.Model, guidfixed, imageRefsByGuid[guidfixed], masterCache, documentTemplates)
@@ -262,10 +322,25 @@ func runBatch(batchID string) {
 	case <-stopEarly:
 		_ = FinishRun(batchID, StatusCancelled, stopReason)
 		log.Printf("[batch %s] stopped early: %s", batchID, stopReason)
+		return
 	default:
-		_ = FinishRun(batchID, StatusCompleted, "")
-		log.Printf("[batch %s] completed", batchID)
 	}
+
+	// No worker observed the stop signal — but a cancel can still have been
+	// requested after the last item was already picked up (with N items and
+	// N workers, every item can be in flight before the cancel lands, so
+	// nothing ever re-checks between items). Consult the flag itself rather
+	// than only the channel, so a run the user cancelled never reports back
+	// as "completed" — the frontend distinguishes these two outcomes and
+	// showing "เสร็จสิ้น" for a cancelled run would be plainly wrong.
+	if cancelled, err := IsCancelRequested(batchID); err == nil && cancelled {
+		_ = FinishRun(batchID, StatusCancelled, "user_requested")
+		log.Printf("[batch %s] cancelled (requested while final items were already in flight)", batchID)
+		return
+	}
+
+	_ = FinishRun(batchID, StatusCompleted, "")
+	log.Printf("[batch %s] completed", batchID)
 }
 
 func runHeartbeat(batchID string, stop <-chan struct{}) {
