@@ -59,6 +59,9 @@ func TestListEligibleGroupsForTask_MatchesKnownFixtureCount(t *testing.T) {
 		t.Fatalf("ListEligibleGroupsForTask failed: %v", err)
 	}
 
+	// 41 status:1 documents, verified by hand against Mongo when this fixture
+	// was chosen. This total is stable: nothing in this feature changes a
+	// document's status, only its ocranalyzeai field.
 	if len(groups) != 41 {
 		t.Fatalf("expected 41 status:1 groups for fixture task, got %d", len(groups))
 	}
@@ -72,12 +75,19 @@ func TestListEligibleGroupsForTask_MatchesKnownFixtureCount(t *testing.T) {
 		}
 	}
 
-	if eligible != 12 {
-		t.Errorf("expected 12 eligible groups, got %d", eligible)
+	// Deliberately NOT asserting eligible == 12 / skipped == 29, even though
+	// those were the counts when this fixture was picked. Every batch run
+	// against this task moves documents from eligible to skipped, so pinning
+	// the split makes this test fail for a reason that has nothing to do with
+	// the code — and a test that cries wolf gets ignored the day it is right.
+	//
+	// What must always hold is the partition itself: every status:1 document
+	// falls in exactly one bucket, decided by the same two helpers the worker
+	// and the preview endpoint use. That is the actual contract.
+	if eligible+skipped != len(groups) {
+		t.Errorf("eligible (%d) + skipped (%d) != total (%d) — a group fell into neither bucket", eligible, skipped, len(groups))
 	}
-	if skipped != 29 {
-		t.Errorf("expected 29 skipped groups, got %d", skipped)
-	}
+	t.Logf("fixture split right now: %d eligible, %d skipped (of %d)", eligible, skipped, len(groups))
 }
 
 func TestHasOcrResult_TreatsMissingFieldAsNotAnalyzed(t *testing.T) {
