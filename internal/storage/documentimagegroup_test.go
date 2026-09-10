@@ -21,6 +21,13 @@ const (
 	testTaskGuid = "3BLFbYgKMUkMexKrZSynNBkwP6x"
 )
 
+func getEnvOrDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 func setupLiveMongoTest(t *testing.T) {
 	t.Helper()
 	godotenv.Load("../../.env")
@@ -29,7 +36,15 @@ func setupLiveMongoTest(t *testing.T) {
 	}
 	configs.MONGO_URI = os.Getenv("MONGO_URI")
 	configs.MONGO_DB_NAME = os.Getenv("MONGO_DB_NAME")
-	configs.DOCUMENT_IMAGE_GROUP_COLLECTION = "documentImageGroups"
+
+	// Take the collection name from config rather than hardcoding it here,
+	// so a wrong default (or a bad DOCUMENT_IMAGE_GROUP_COLLECTION override)
+	// fails these tests instead of being masked by the test's own literal.
+	configs.DOCUMENT_IMAGE_GROUP_COLLECTION = getEnvOrDefault("DOCUMENT_IMAGE_GROUP_COLLECTION", "documentImageGroups")
+	if configs.DOCUMENT_IMAGE_GROUP_COLLECTION != "documentImageGroups" {
+		t.Logf("note: DOCUMENT_IMAGE_GROUP_COLLECTION overridden to %q", configs.DOCUMENT_IMAGE_GROUP_COLLECTION)
+	}
+
 	if err := InitMongoDB(); err != nil {
 		t.Fatalf("mongo connect failed: %v", err)
 	}
@@ -155,78 +170,179 @@ func TestRefreshGroupStates_MatchesListEligibleGroupsForTask(t *testing.T) {
 	}
 }
 
-// TestSetGroupOcrAnalyzeAI_RoundTrip picks one confirmed-eligible group from
-// the fixture task (no ocranalyzeai, no references), writes a harmless
-// placeholder result to it, and verifies the write matches. This directly
-// exercises the $or filter's most important case: writing to a document
-// whose ocranalyzeai field may not exist at all (see SetGroupOcrAnalyzeAI's
-// doc comment on why `ocranalyzeai: ""` alone would silently no-op here).
-//
-// This test mutates real data in the shared dev database — it only touches
-// a group that is already eligible (unanalyzed, unrecorded) in the known
-// fixture task, and only sets ocranalyzeai, which is exactly what the batch
-// worker itself would do to that same document.
-func TestSetGroupOcrAnalyzeAI_RoundTrip(t *testing.T) {
-	setupLiveMongoTest(t)
+// ocranalyzeaiState describes how a document currently represents "not yet
+// analyzed", which this collection does in three different ways.
+type ocranalyzeaiState int
 
-	groups, err := ListEligibleGroupsForTask(testShopID, testTaskGuid)
+const (
+	stateMissing ocranalyzeaiState = iota // field absent from the document entirely
+	stateEmpty                            // field present, set to ""
+	stateNull                             // field present, set to null
+)
+
+func (s ocranalyzeaiState) String() string {
+	switch s {
+	case stateMissing:
+		return "missing"
+	case stateEmpty:
+		return `empty-string`
+	default:
+		return "null"
+	}
+}
+
+// findEligibleGroupInState locates a group in the fixture task that is
+// unanalyzed and unrecorded AND whose ocranalyzeai is in the requested
+// state, so a test can target one specific representation rather than
+// whichever document happens to sort first.
+func findEligibleGroupInState(t *testing.T, want ocranalyzeaiState) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var stateFilter bson.M
+	switch want {
+	case stateMissing:
+		stateFilter = bson.M{"ocranalyzeai": bson.M{"$exists": false}}
+	case stateEmpty:
+		stateFilter = bson.M{"ocranalyzeai": ""}
+	default:
+		stateFilter = bson.M{"ocranalyzeai": nil, "$and": []bson.M{{"ocranalyzeai": bson.M{"$exists": true}}}}
+	}
+
+	filter := bson.M{
+		"shopid":   testShopID,
+		"taskguid": testTaskGuid,
+		"status":   1,
+		"$or": []bson.M{
+			{"references": bson.M{"$exists": false}},
+			{"references": bson.M{"$size": 0}},
+		},
+	}
+	for k, v := range stateFilter {
+		filter[k] = v
+	}
+
+	var doc struct {
+		GuidFixed string `bson:"guidfixed"`
+	}
+	err := GetMongoDB().Collection(configs.DOCUMENT_IMAGE_GROUP_COLLECTION).
+		FindOne(ctx, filter).Decode(&doc)
 	if err != nil {
-		t.Fatalf("ListEligibleGroupsForTask failed: %v", err)
+		t.Skipf("no eligible group with ocranalyzeai %s in fixture task: %v", want, err)
 	}
+	return doc.GuidFixed
+}
 
-	var target *DocumentImageGroupRef
-	for i := range groups {
-		if !groups[i].HasOcrResult() && !groups[i].IsAlreadyRecorded() {
-			target = &groups[i]
-			break
-		}
-	}
-	if target == nil {
-		t.Skip("no eligible (unanalyzed, unrecorded) group found in fixture task — cannot test write path")
-	}
-
-	// This mutates a real shared document, so restore it to its original
-	// (unset) state afterward regardless of test outcome — this is someone
-	// else's collection, not a scratch one we own.
+// restoreOcrAnalyzeAI puts a document back into the exact state it was in
+// before a test wrote to it. Blindly $unset-ing would be wrong: a document
+// that started as `ocranalyzeai: ""` would come back as a document with no
+// such field, which is a different state — and this is another team's
+// collection, so tests must not quietly reshape its documents.
+func restoreOcrAnalyzeAI(t *testing.T, guidfixed string, original ocranalyzeaiState) {
+	t.Helper()
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+
+		var update bson.M
+		switch original {
+		case stateMissing:
+			update = bson.M{"$unset": bson.M{"ocranalyzeai": ""}}
+		case stateEmpty:
+			update = bson.M{"$set": bson.M{"ocranalyzeai": ""}}
+		default:
+			update = bson.M{"$set": bson.M{"ocranalyzeai": nil}}
+		}
+
 		_, err := GetMongoDB().Collection(configs.DOCUMENT_IMAGE_GROUP_COLLECTION).UpdateOne(
 			ctx,
-			bson.M{"shopid": testShopID, "guidfixed": target.GuidFixed},
-			bson.M{"$unset": bson.M{"ocranalyzeai": ""}},
+			bson.M{"shopid": testShopID, "guidfixed": guidfixed},
+			update,
 		)
 		if err != nil {
-			t.Logf("cleanup: failed to unset ocranalyzeai on %s: %v", target.GuidFixed, err)
+			t.Errorf("cleanup: failed to restore ocranalyzeai=%s on %s: %v — dev DB may be left dirty", original, guidfixed, err)
 		}
 	})
+}
 
-	const testPayload = `{"_test":"documentimagegroup_test.go TestSetGroupOcrAnalyzeAI_RoundTrip"}`
+// TestSetGroupOcrAnalyzeAI_RoundTrip runs the write path against each of the
+// three ways this collection represents "not yet analyzed", rather than
+// against whichever eligible document happens to sort first.
+//
+// That distinction matters: of the 41 status:1 documents in the fixture
+// task, only ONE has ocranalyzeai missing entirely while 27 have it set to
+// "". A test that just takes the first eligible document is therefore one
+// _id-ordering change (or one edited document) away from silently no longer
+// covering the missing-field case — which is the exact case the $or filter
+// exists for and the exact case whose failure mode is "pay for AI, discard
+// the result, report success".
+//
+// This mutates real documents in the shared dev database, but only ones
+// already eligible (unanalyzed, unrecorded), only the ocranalyzeai field,
+// and each is restored to its original representation afterward.
+func TestSetGroupOcrAnalyzeAI_RoundTrip(t *testing.T) {
+	setupLiveMongoTest(t)
 
-	written, err := SetGroupOcrAnalyzeAI(testShopID, target.GuidFixed, testPayload)
-	if err != nil {
-		t.Fatalf("SetGroupOcrAnalyzeAI failed: %v", err)
-	}
-	if !written {
-		t.Fatalf("expected written=true for a confirmed-eligible group %s (this is exactly the missing-field case the $or filter exists for)", target.GuidFixed)
-	}
+	for _, original := range []ocranalyzeaiState{stateMissing, stateEmpty, stateNull} {
+		t.Run(original.String(), func(t *testing.T) {
+			guidfixed := findEligibleGroupInState(t, original)
+			restoreOcrAnalyzeAI(t, guidfixed, original)
 
-	// Immediately trying again must report written=false — the field is no
-	// longer empty/absent, so this exercises the "someone already wrote a
-	// result" branch (which the batch worker treats as skip-not-error).
-	writtenAgain, err := SetGroupOcrAnalyzeAI(testShopID, target.GuidFixed, testPayload)
-	if err != nil {
-		t.Fatalf("second SetGroupOcrAnalyzeAI call failed: %v", err)
-	}
-	if writtenAgain {
-		t.Errorf("expected written=false on second write to the same group (ocranalyzeai is no longer empty/absent)")
-	}
+			testPayload := `{"_test":"TestSetGroupOcrAnalyzeAI_RoundTrip/` + original.String() + `"}`
 
-	refreshed, err := RefreshGroupStates(testShopID, testTaskGuid, []string{target.GuidFixed})
-	if err != nil {
-		t.Fatalf("RefreshGroupStates failed: %v", err)
+			written, err := SetGroupOcrAnalyzeAI(testShopID, guidfixed, testPayload)
+			if err != nil {
+				t.Fatalf("SetGroupOcrAnalyzeAI failed: %v", err)
+			}
+			if !written {
+				t.Fatalf("expected written=true for eligible group %s with ocranalyzeai %s — "+
+					"this is the case the $or filter exists for; a false here means the batch worker "+
+					"would pay for AI and silently discard the result", guidfixed, original)
+			}
+
+			// A second write must report written=false, not an error: the
+			// field is now populated, which is how the worker detects
+			// "someone else got here first" and marks the item skipped.
+			writtenAgain, err := SetGroupOcrAnalyzeAI(testShopID, guidfixed, testPayload)
+			if err != nil {
+				t.Fatalf("second SetGroupOcrAnalyzeAI call failed: %v", err)
+			}
+			if writtenAgain {
+				t.Errorf("expected written=false on second write to %s (ocranalyzeai is populated now)", guidfixed)
+			}
+
+			refreshed, err := RefreshGroupStates(testShopID, testTaskGuid, []string{guidfixed})
+			if err != nil {
+				t.Fatalf("RefreshGroupStates failed: %v", err)
+			}
+			g, ok := refreshed[guidfixed]
+			if !ok {
+				t.Fatalf("guidfixed %s missing from RefreshGroupStates after write", guidfixed)
+			}
+			if g.OcrAnalyzeAI != testPayload {
+				t.Errorf("expected ocranalyzeai %q after write, got %q", testPayload, g.OcrAnalyzeAI)
+			}
+			if !g.HasOcrResult() {
+				t.Errorf("expected HasOcrResult() true after a successful write to %s", guidfixed)
+			}
+		})
 	}
-	if g, ok := refreshed[target.GuidFixed]; !ok || g.OcrAnalyzeAI != testPayload {
-		t.Errorf("expected ocranalyzeai to be set to test payload after write, got %+v (found=%v)", g, ok)
+}
+
+// TestSetGroupOcrAnalyzeAI_DeletedDocumentReturnsError distinguishes the two
+// reasons a write can fail to match: an already-populated document (skip,
+// not an error) versus a document that no longer exists (a real error the
+// worker must not silently swallow as "skipped").
+func TestSetGroupOcrAnalyzeAI_DeletedDocumentReturnsError(t *testing.T) {
+	setupLiveMongoTest(t)
+
+	written, err := SetGroupOcrAnalyzeAI(testShopID, "guid-that-does-not-exist-batchocr-test", `{"x":1}`)
+	if written {
+		t.Error("expected written=false for a nonexistent document")
+	}
+	if err == nil {
+		t.Error("expected an error for a nonexistent document — the worker relies on this to avoid marking a vanished document as merely skipped")
 	}
 }
