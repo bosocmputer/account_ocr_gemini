@@ -89,6 +89,56 @@ var (
 	EXCEL_IMPORT_MAX_ROWS         int // reject files with more data rows than this
 	EXCEL_IMPORT_MAX_FILE_SIZE_MB int // reject uploads larger than this, checked from the multipart header before saving to disk
 	EXCEL_IMPORT_TIMEOUT_SEC      int // pipeline deadline, checked periodically inside the row-processing loop (not just at stage boundaries — that loop is this pipeline's dominant cost)
+
+	// Batch background OCR — lets an accountant kick off AI analysis for every
+	// eligible document in a task and close the browser; a server-side worker
+	// keeps going and the task page picks the run back up when reopened.
+	// Throughput here is bounded by internal/ratelimit's global Gemini quota
+	// (~12 calls/min for the whole process), not by these settings — raising
+	// BATCH_OCR_CONCURRENCY does not make a batch finish faster, it only takes
+	// more of that shared quota away from people actively using the analyze
+	// endpoint interactively. Keep concurrency low and rely on the delay
+	// instead.
+	BATCH_OCR_ENABLED     bool // emergency kill switch for the whole feature
+	BATCH_OCR_CONCURRENCY int  // documents processed in parallel per batch run — keep low, see note above
+	BATCH_OCR_MAX_ITEMS   int  // hard cap on documents accepted into one batch run
+
+	// Delay between documents within a batch, so a long-running batch doesn't
+	// starve interactive users of the same shared rate-limit budget.
+	BATCH_OCR_ITEM_DELAY_MS int
+
+	// Automatic retry count per document before it's marked failed (covers
+	// transient errors like a slow image download, not permanent ones).
+	BATCH_OCR_MAX_ATTEMPTS int
+
+	// Per-document timeout, matching the ~5 minute wall-clock deadline the
+	// existing single-document analyze pipeline already enforces.
+	BATCH_OCR_ITEM_TIMEOUT_SEC int
+
+	// How long a batch run's lease can go without a heartbeat before another
+	// instance is allowed to claim it as orphaned (e.g. after a hard crash or
+	// container restart mid-run).
+	BATCH_OCR_STALE_LEASE_SEC int
+
+	// Our own MongoDB collection for batch run/item state — safe to add
+	// indexes on, unlike DOCUMENT_IMAGE_GROUP_COLLECTION below.
+	BATCH_OCR_COLLECTION string
+
+	// Rough per-document cost estimate shown to the user before they confirm
+	// a batch run (so a several-hundred-baht button press isn't a surprise).
+	// Adjust from real logged costs over time — this is a starting guess, not
+	// a computed price.
+	BATCH_OCR_EST_COST_PER_DOC_THB float64
+
+	// The MongoDB collection holding document image groups — confirmed via
+	// Mongo Compass to be "documentImageGroups" (camelCase, trailing "s").
+	// This collection belongs to the main API/team, not this service: we
+	// only read/write specific fields on it (ocranalyzeai, via
+	// internal/storage/documentimagegroup.go) and never create indexes on it
+	// (it has none beyond the default _id_ index — every query against it is
+	// a full collection scan by design; see internal/batchocr's package
+	// comment for how the worker avoids doing that per-document).
+	DOCUMENT_IMAGE_GROUP_COLLECTION string
 )
 
 // LoadConfig loads configuration from environment variables
@@ -161,6 +211,22 @@ func LoadConfig() {
 	EXCEL_IMPORT_MAX_ROWS = getEnvInt("EXCEL_IMPORT_MAX_ROWS", 20000)
 	EXCEL_IMPORT_MAX_FILE_SIZE_MB = getEnvInt("EXCEL_IMPORT_MAX_FILE_SIZE_MB", 15)
 	EXCEL_IMPORT_TIMEOUT_SEC = getEnvInt("EXCEL_IMPORT_TIMEOUT_SEC", 180)
+
+	// Batch background OCR
+	BATCH_OCR_ENABLED = getEnvBool("BATCH_OCR_ENABLED", true)
+	// Default 1: read one document at a time. Chosen deliberately over 2 —
+	// the batch shares internal/ratelimit's global quota with the interactive
+	// "AI วิเคราะห์" button people use while the batch runs, and starving
+	// those users matters more than finishing the batch ~40% sooner.
+	BATCH_OCR_CONCURRENCY = getEnvInt("BATCH_OCR_CONCURRENCY", 1)
+	BATCH_OCR_MAX_ITEMS = getEnvInt("BATCH_OCR_MAX_ITEMS", 100)
+	BATCH_OCR_ITEM_DELAY_MS = getEnvInt("BATCH_OCR_ITEM_DELAY_MS", 2000)
+	BATCH_OCR_MAX_ATTEMPTS = getEnvInt("BATCH_OCR_MAX_ATTEMPTS", 2)
+	BATCH_OCR_ITEM_TIMEOUT_SEC = getEnvInt("BATCH_OCR_ITEM_TIMEOUT_SEC", 300)
+	BATCH_OCR_STALE_LEASE_SEC = getEnvInt("BATCH_OCR_STALE_LEASE_SEC", 900)
+	BATCH_OCR_COLLECTION = getEnv("BATCH_OCR_COLLECTION", "batch_ocr_runs")
+	BATCH_OCR_EST_COST_PER_DOC_THB = getEnvFloat("BATCH_OCR_EST_COST_PER_DOC_THB", 0.30)
+	DOCUMENT_IMAGE_GROUP_COLLECTION = getEnv("DOCUMENT_IMAGE_GROUP_COLLECTION", "documentImageGroups")
 
 	log.Println("✓ Configuration loaded successfully")
 }
