@@ -214,7 +214,11 @@ func LoadConfig() {
 
 	// Batch background OCR
 	BATCH_OCR_ENABLED = getEnvBool("BATCH_OCR_ENABLED", true)
-	BATCH_OCR_CONCURRENCY = getEnvInt("BATCH_OCR_CONCURRENCY", 2)
+	// Default 1: read one document at a time. Chosen deliberately over 2 —
+	// the batch shares internal/ratelimit's global quota with the interactive
+	// "AI วิเคราะห์" button people use while the batch runs, and starving
+	// those users matters more than finishing the batch ~40% sooner.
+	BATCH_OCR_CONCURRENCY = getEnvInt("BATCH_OCR_CONCURRENCY", 1)
 	BATCH_OCR_MAX_ITEMS = getEnvInt("BATCH_OCR_MAX_ITEMS", 100)
 	BATCH_OCR_ITEM_DELAY_MS = getEnvInt("BATCH_OCR_ITEM_DELAY_MS", 2000)
 	BATCH_OCR_MAX_ATTEMPTS = getEnvInt("BATCH_OCR_MAX_ATTEMPTS", 2)
