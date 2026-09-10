@@ -335,20 +335,24 @@ func GetBatchOcrStatusHandler(c *gin.Context) {
 	estimatedRemainingMinutes := estimateMinutes(remainingDocs)
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":                      run.Status,
-		"total":                       run.Total,
-		"done":                        done,
-		"failed":                      failed,
-		"skipped":                     skipped,
-		"pending":                     pending,
-		"processing":                  processing,
-		"percent":                     percent,
-		"model":                       run.Model,
-		"createdat":                   run.CreatedAt,
-		"finishedat":                  run.FinishedAt,
-		"cancelrequested":             run.CancelRequested,
-		"cancelreason":                run.CancelReason,
-		"total_cost_thb":              run.TotalCostTHB,
+		"status":          run.Status,
+		"total":           run.Total,
+		"done":            done,
+		"failed":          failed,
+		"skipped":         skipped,
+		"pending":         pending,
+		"processing":      processing,
+		"percent":         percent,
+		"model":           run.Model,
+		"createdat":       run.CreatedAt,
+		"finishedat":      run.FinishedAt,
+		"cancelrequested": run.CancelRequested,
+		"cancelreason":    run.CancelReason,
+		// Rounded to satang for the same reason estimated_cost_thb is: this
+		// is accumulated with $inc across many items, so float64 drift shows
+		// up verbatim in the UI (e.g. 3.4199999999999995) once the frontend
+		// interpolates it into "ใช้ไป ฿...".
+		"total_cost_thb":              math.Round(run.TotalCostTHB*100) / 100,
 		"failed_items":                failedItems,
 		"failed_truncated":            failedTruncated,
 		"estimated_remaining_minutes": estimatedRemainingMinutes,

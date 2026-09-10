@@ -9,10 +9,24 @@ package batchocr
 import (
 	"context"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 )
+
+// draining is set during graceful shutdown to tell the in-process worker to
+// stop picking up new items. Deliberately process-local rather than a field
+// on the run in MongoDB: a shutdown must not leave any durable "stop" mark
+// behind, or the next instance would resume the run and immediately stop it
+// again. See Drain.
+var draining atomic.Bool
+
+func setDraining(v bool) { draining.Store(v) }
+
+// IsDraining reports whether this process is shutting down and should stop
+// picking up new batch items.
+func IsDraining() bool { return draining.Load() }
 
 // instanceID identifies this process for ClaimOrphanedRuns' ownerinstance
 // field. A random-ish value is enough — it only needs to be distinct enough
@@ -118,14 +132,23 @@ func Drain(ctx context.Context) {
 		return
 	}
 
-	log.Printf("[batch %s] shutdown: requesting cancel and releasing lease", batchID)
-	if err := RequestCancel(batchID); err != nil {
-		log.Printf("[batch %s] shutdown: failed to request cancel: %v", batchID, err)
-	}
-	// Release the lease immediately (rather than waiting for it to expire)
-	// so the next instance to start up doesn't have to wait out the full
-	// stale-lease window before resuming this run.
-	if err := releaseLease(batchID); err != nil {
-		log.Printf("[batch %s] shutdown: failed to release lease: %v", batchID, err)
+	log.Printf("[batch %s] shutdown: pausing run and releasing lease for another instance to resume", batchID)
+
+	// Signal the in-process worker to stop picking up new items via a
+	// process-local flag, NOT by setting the run's cancelrequested field in
+	// MongoDB. That field means "the user pressed ยกเลิก" and is durable —
+	// writing it here would make every graceful shutdown permanently kill
+	// the batch it was running: on restart, resume would claim the run,
+	// immediately see the leftover flag, and stop again ("stopped early:
+	// user_requested" one second after starting). A redeploy must pause a
+	// batch, not cancel it.
+	setDraining(true)
+
+	// Put the run back to "queued" and expire its lease, so the next
+	// instance's resume scan picks it up right away instead of waiting out
+	// the full stale-lease window — and so it isn't left in "running" with
+	// nothing actually running it.
+	if err := requeueForResume(batchID); err != nil {
+		log.Printf("[batch %s] shutdown: failed to requeue for resume: %v", batchID, err)
 	}
 }

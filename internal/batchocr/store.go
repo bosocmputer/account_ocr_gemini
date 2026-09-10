@@ -424,6 +424,33 @@ func reopenForRetry(batchID string) error {
 	return nil
 }
 
+// requeueForResume puts a run back to "queued" with an expired lease so the
+// next instance's resume scan claims it immediately. Used by graceful
+// shutdown (Drain): leaving the run in "running" with no process actually
+// running it would mean waiting out the full BATCH_OCR_STALE_LEASE_SEC
+// window before anything picked it back up, and marking it cancelled would
+// mean it never gets picked back up at all.
+//
+// Deliberately leaves cancelrequested untouched — that flag is the user's
+// decision, not the deployment's.
+func requeueForResume(batchID string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	_, err := collection().UpdateOne(ctx,
+		bson.M{"batchid": batchID},
+		bson.M{"$set": bson.M{
+			"status":         StatusQueued,
+			"leaseexpiresat": time.Time{},
+			"updatedat":      time.Now(),
+		}},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to requeue batch %s for resume: %w", batchID, err)
+	}
+	return nil
+}
+
 // releaseLease immediately expires a run's lease (sets it to the zero
 // value, which is already "in the past") so another instance's next resume
 // scan can claim it right away, instead of waiting out the full

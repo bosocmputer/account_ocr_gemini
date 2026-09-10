@@ -267,6 +267,15 @@ func runBatch(batchID string) {
 				n := processedCount
 				countMu.Unlock()
 
+				// This process is shutting down: stop taking new items and
+				// leave the rest for whichever instance resumes this run.
+				// Distinct from a user cancel — nothing durable is written,
+				// so the run stays resumable (see Drain).
+				if IsDraining() {
+					triggerStop("draining")
+					return
+				}
+
 				// Cancel is checked before EVERY item, not on the 10-item
 				// cadence below: it's an indexed point lookup on our own
 				// batch_ocr_runs collection (unique batchid index), so it
@@ -320,6 +329,15 @@ func runBatch(batchID string) {
 
 	select {
 	case <-stopEarly:
+		if stopReason == "draining" {
+			// Shutdown, not cancellation: leave the run in a resumable
+			// state (Drain has already requeued it) rather than writing a
+			// terminal status. Calling FinishRun here would set finishedat
+			// and a terminal status, and the run would never be picked up
+			// again — which is the whole failure this path exists to avoid.
+			log.Printf("[batch %s] paused for shutdown — %d item(s) left for the next instance", batchID, remainingPendingCount(batchID))
+			return
+		}
 		_ = FinishRun(batchID, StatusCancelled, stopReason)
 		log.Printf("[batch %s] stopped early: %s", batchID, stopReason)
 		return
@@ -341,6 +359,23 @@ func runBatch(batchID string) {
 
 	_ = FinishRun(batchID, StatusCompleted, "")
 	log.Printf("[batch %s] completed", batchID)
+}
+
+// remainingPendingCount is a best-effort count for the shutdown log line —
+// returns 0 rather than an error if the run can't be read, since this is
+// only used for logging during shutdown.
+func remainingPendingCount(batchID string) int {
+	run, err := getByBatchIDOnly(batchID)
+	if err != nil || run == nil {
+		return 0
+	}
+	n := 0
+	for _, it := range run.Items {
+		if it.Status == ItemPending || it.Status == ItemProcessing {
+			n++
+		}
+	}
+	return n
 }
 
 func runHeartbeat(batchID string, stop <-chan struct{}) {
