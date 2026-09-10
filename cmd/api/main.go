@@ -13,6 +13,7 @@ import (
 
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/bosocmputer/account_ocr_gemini/internal/api"
+	"github.com/bosocmputer/account_ocr_gemini/internal/batchocr"
 	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/gin-gonic/gin"
 )
@@ -34,6 +35,15 @@ func main() {
 		log.Fatalf("Failed to connect to MongoDB: %v", err)
 	}
 	defer storage.CloseMongoDB()
+
+	// Batch background OCR: index setup + resuming any runs left mid-flight
+	// by a previous process (crash, redeploy). Neither may log.Fatal — a
+	// problem in this subsystem must not prevent the service from serving
+	// interactive requests, which don't depend on it at all.
+	if err := batchocr.EnsureIndexes(); err != nil {
+		log.Printf("⚠️ batch OCR index setup failed: %v", err)
+	}
+	batchocr.StartResume()
 
 	// Step 2: Initialize the Gin router
 	router := gin.Default()
@@ -107,6 +117,18 @@ func main() {
 	// See SubmitSmlSalesImportValidationHandler's doc comment.
 	billscan.POST("/api/v1/import-journal/validate-sml-sales", api.SubmitSmlSalesImportValidationHandler)
 
+	// Batch background OCR — lets an accountant kick off AI analysis for
+	// every eligible document in a task and close the browser; a
+	// server-side worker keeps going and these endpoints let the task page
+	// pick the run back up on reopening. See internal/batchocr and
+	// plan-clever-lemon.md for the full design.
+	billscan.GET("/api/v1/batch-ocr/preview", batchocr.GetBatchOcrPreviewHandler)
+	billscan.POST("/api/v1/batch-ocr", batchocr.SubmitBatchOcrHandler)
+	billscan.GET("/api/v1/batch-ocr/active", batchocr.GetActiveBatchOcrHandler)
+	billscan.GET("/api/v1/batch-ocr/:batchId", batchocr.GetBatchOcrStatusHandler)
+	billscan.POST("/api/v1/batch-ocr/:batchId/cancel", batchocr.CancelBatchOcrHandler)
+	billscan.POST("/api/v1/batch-ocr/:batchId/retry", batchocr.RetryBatchOcrFailedHandler)
+
 	// Step 4: Setup HTTP server with timeouts.
 	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute
 	// budget (internal/api/handlers.go's runAnalyzePipeline) — the longest
@@ -131,6 +153,12 @@ func main() {
 		log.Println("  POST /billscan/api/v1/test-template (async — returns a job id)")
 		log.Println("  GET  /billscan/api/v1/jobs/:id (poll progress/result)")
 		log.Println("  POST /billscan/api/v1/import-journal/validate-sml-sales (async — returns a job id)")
+		log.Println("  GET  /billscan/api/v1/batch-ocr/preview (eligible/skipped counts, no run created)")
+		log.Println("  POST /billscan/api/v1/batch-ocr (starts a batch run — returns a batchid)")
+		log.Println("  GET  /billscan/api/v1/batch-ocr/active (is there an active run for this task?)")
+		log.Println("  GET  /billscan/api/v1/batch-ocr/:batchId (poll a run's progress)")
+		log.Println("  POST /billscan/api/v1/batch-ocr/:batchId/cancel")
+		log.Println("  POST /billscan/api/v1/batch-ocr/:batchId/retry")
 
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start server: %v", err)
@@ -146,6 +174,12 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Stop the current batch run from picking up new items and release its
+	// lease so another instance can resume it immediately — does not wait
+	// for whatever document is currently mid-analysis (see Drain's doc
+	// comment for why that can't be interrupted anyway).
+	batchocr.Drain(ctx)
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)

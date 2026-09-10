@@ -162,8 +162,10 @@ func (m *MistralProvider) ProcessPureOCR(imagePath string, reqCtx *common.Reques
 		}
 	}
 
-	// Step 4: Call Mistral OCR API
-	response, err := m.callMistralOCRAPI(request)
+	// Step 4: Call Mistral OCR API (with retry/backoff + shared rate
+	// limiting — see mistral_retry.go for why this uses the same global
+	// limiter as Gemini)
+	response, err := m.callMistralOCRAPIWithRetry(request, reqCtx, DefaultRetryConfig)
 	reqCtx.EndSubStep("")
 	if err != nil {
 		return nil, nil, fmt.Errorf("mistral OCR API call failed: %w", err)
@@ -268,13 +270,17 @@ func (m *MistralProvider) callMistralOCRAPI(request mistralOCRRequest) (*mistral
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Check status code
+	// Check status code. Errors are returned as *mistralAPIError (not
+	// fmt.Errorf) so categorizeMistralError (mistral_retry.go) can recover
+	// the status code via a type assertion instead of re-parsing this
+	// message string — same approach gemini_retry.go uses with
+	// *googleapi.Error.
 	if resp.StatusCode != http.StatusOK {
 		var errorResp mistralErrorResponse
 		if err := json.Unmarshal(body, &errorResp); err == nil && errorResp.Error.Message != "" {
-			return nil, fmt.Errorf("mistral OCR API error (%d): %s", resp.StatusCode, errorResp.Error.Message)
+			return nil, &mistralAPIError{StatusCode: resp.StatusCode, Body: errorResp.Error.Message}
 		}
-		return nil, fmt.Errorf("mistral OCR API error (%d): %s", resp.StatusCode, string(body))
+		return nil, &mistralAPIError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	// Parse response
