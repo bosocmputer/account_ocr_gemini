@@ -376,28 +376,19 @@ func validateImportConfig(cfg *ImportValidationConfig) string {
 // buildParsedDocuments re-validates the actual resolved value per document
 // instead, so a bad per-row cell still can't silently default to 0.
 func validateVatClassification(cfg *ImportValidationConfig) string {
-	hasVatColumn := cfg.FieldMappings["vatdocno"] != nil
-	if !hasVatColumn {
-		return ""
-	}
 	hasVatModeColumn := cfg.FieldMappings["vatmode"] != nil
 	hasVatTypeColumn := cfg.FieldMappings["vattype"] != nil
-	hasVatOrganizationColumn := cfg.FieldMappings["vatorganization"] != nil
-	if !hasVatOrganizationColumn && cfg.VatOrganization == nil {
-		return "vatOrganization is required when a vatdocno column is mapped and no vatorganization column is mapped"
-	}
-	if !hasVatModeColumn && cfg.VatMode == nil {
-		return "vatMode is required when a vatdocno column is mapped and no vatmode column is mapped"
-	}
-	if !hasVatTypeColumn && cfg.VatType == nil {
-		return "vatType is required when a vatdocno column is mapped and no vattype column is mapped"
-	}
-	if !hasVatModeColumn {
+	// Deliberately not required just because a vatdocno column is mapped —
+	// same reasoning as validateWhtClassification: the client auto-suggests
+	// mappings from header names, so a mapped column is not evidence the file
+	// carries VAT data. buildParsedDocuments enforces the requirement per
+	// document, once a row is known to actually carry a vatdocno value.
+	if !hasVatModeColumn && cfg.VatMode != nil {
 		if *cfg.VatMode != 0 && *cfg.VatMode != 1 {
 			return fmt.Sprintf("vatMode must be 0 or 1, got %d", *cfg.VatMode)
 		}
 	}
-	if !hasVatModeColumn && !hasVatTypeColumn {
+	if !hasVatModeColumn && !hasVatTypeColumn && cfg.VatMode != nil && cfg.VatType != nil {
 		if *cfg.VatMode == 0 {
 			if *cfg.VatType < 0 || *cfg.VatType > 2 {
 				return fmt.Sprintf("vatType must be 0-2 when vatMode is 0 (ภาษีซื้อ), got %d", *cfg.VatType)
@@ -408,7 +399,7 @@ func validateVatClassification(cfg *ImportValidationConfig) string {
 			}
 		}
 	}
-	if !hasVatOrganizationColumn {
+	if cfg.FieldMappings["vatorganization"] == nil && cfg.VatOrganization != nil {
 		if *cfg.VatOrganization != 0 && *cfg.VatOrganization != 1 {
 			return fmt.Sprintf("vatOrganization must be 0 or 1, got %d", *cfg.VatOrganization)
 		}
@@ -1231,6 +1222,22 @@ func buildParsedDocuments(
 			vatModeField := collectRowLevelField(g.SourceRows, "vatmode", true)
 			vatTypeField := collectRowLevelField(g.SourceRows, "vattype", true)
 			vatOrganizationField := collectRowLevelField(g.SourceRows, "vatorganization", true)
+			// This document really does carry VAT data, so each classification
+			// field must have a source — a mapped column for this row, or the
+			// wizard-level value. Without one, intOrZero below would silently
+			// default it to 0 and file the document into the wrong VAT report.
+			// Checked here rather than in validateVatClassification because
+			// only now is it known that a record will actually be built (a
+			// mapped-but-empty vatdocno column must not trigger this).
+			if !vatModeField.HasValue && cfg.VatMode == nil {
+				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "vatmode", Message: `เอกสารนี้มีข้อมูลภาษีมูลค่าเพิ่ม จึงต้องระบุ "ภาษีซื้อ/ภาษีขาย" ในขั้นจับคู่คอลัมน์ก่อน`})
+			}
+			if !vatTypeField.HasValue && cfg.VatType == nil {
+				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "vattype", Message: `เอกสารนี้มีข้อมูลภาษีมูลค่าเพิ่ม จึงต้องระบุ "ประเภทภาษี" ในขั้นจับคู่คอลัมน์ก่อน`})
+			}
+			if !vatOrganizationField.HasValue && cfg.VatOrganization == nil {
+				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "vatorganization", Message: `เอกสารนี้มีข้อมูลภาษีมูลค่าเพิ่ม จึงต้องระบุ "สำนักงานใหญ่/สาขา" ในขั้นจับคู่คอลัมน์ก่อน`})
+			}
 			vatMode := intOrZero(cfg.VatMode)
 			if vatModeField.HasValue {
 				vatMode = int(numOrZeroField(vatModeField))

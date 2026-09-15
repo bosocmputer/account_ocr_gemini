@@ -80,6 +80,11 @@ func TestBuildParsedDocuments_SampleImportPerLine(t *testing.T) {
 		// buildParsedDocuments directly.
 		WhtTaxType:  ref(0),
 		WhtCustType: ref(0),
+		// Likewise: this sample carries real VAT records, and the wizard-level
+		// classification is what decides which VAT report they land on.
+		VatMode:         ref(0),
+		VatType:         ref(0),
+		VatOrganization: ref(0),
 		FieldMappings: map[string]*int{
 			"docno":              col(0),
 			"docdate":            col(1),
@@ -472,10 +477,14 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 		t.Errorf("expected no VAT/WHT requirement without vatdocno/taxdocno mapped, got error: %s", msg)
 	}
 
-	// vatdocno mapped but classification fields missing entirely.
+	// vatdocno mapped but classification fields missing entirely — must NOT be
+	// rejected up front, for the same reason as taxdocno below: a mapped
+	// column only means the client's header auto-suggest matched a name, not
+	// that the file carries VAT data. Enforced per-document instead, once a
+	// row is known to actually carry a vatdocno value.
 	cfg := withVatCol(ImportValidationConfig{})
-	if msg := validateImportConfig(&cfg); msg == "" {
-		t.Error("expected an error when vatdocno is mapped but vatMode/vatType/vatOrganization are unset")
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected a mapped-but-possibly-empty vatdocno column to pass pre-flight, got error: %s", msg)
 	}
 
 	// vatMode out of range.
@@ -540,9 +549,11 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 	if msg := validateImportConfig(&cfg); msg != "" {
 		t.Errorf("expected vatMode to not be required when a vatmode column is mapped, got error: %s", msg)
 	}
+	// vatOrganization is no longer demanded up front either — the per-document
+	// check raises it only for documents that actually carry VAT data.
 	cfg = withVatModeCol(ImportValidationConfig{VatType: ref(0)})
-	if msg := validateImportConfig(&cfg); msg == "" {
-		t.Error("expected vatOrganization to still be required even with a vatmode column mapped")
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected pre-flight to accept a missing vatOrganization, got error: %s", msg)
 	}
 
 	// vattype column mapped: vatMode/vatOrganization still required, vatType
@@ -554,8 +565,8 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 		t.Errorf("expected vatType to not be required when a vattype column is mapped, got error: %s", msg)
 	}
 	cfg = withVatTypeCol(ImportValidationConfig{VatOrganization: ref(0)})
-	if msg := validateImportConfig(&cfg); msg == "" {
-		t.Error("expected vatMode to still be required even with a vattype column mapped")
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected pre-flight to accept a missing vatMode, got error: %s", msg)
 	}
 
 	// vatorganization column mapped: vatMode/vatType still required,
@@ -565,8 +576,8 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 		t.Errorf("expected vatOrganization to not be required when a vatorganization column is mapped, got error: %s", msg)
 	}
 	cfg = withVatOrganizationCol(ImportValidationConfig{VatMode: ref(0)})
-	if msg := validateImportConfig(&cfg); msg == "" {
-		t.Error("expected vatType to still be required even with a vatorganization column mapped")
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected pre-flight to accept a missing vatType, got error: %s", msg)
 	}
 
 	// All three mapped at once — nothing wizard-level required at all.
@@ -653,6 +664,12 @@ func TestBuildParsedDocuments_PerDocumentColumns_TemplateJournal(t *testing.T) {
 			{Column: 9, AccountCode: "215500", Side: "credit"},
 			{Column: 10, AccountCode: "410010", Side: "credit"},
 		},
+		// This template carries real VAT records, so the wizard-level
+		// classification has to be supplied — it decides which VAT report they
+		// land on and has no per-row source here.
+		VatMode:         ref(1),
+		VatType:         ref(0),
+		VatOrganization: ref(0),
 		FieldMappings: map[string]*int{
 			"docno": col(0), "docdate": col(1), "bookcode": col(5), "accountdescription": col(6),
 			"vatdate": col(17), "vatdocno": col(18), "vatbase": col(21), "vatrate": col(22), "vatamount": col(23),
@@ -865,6 +882,45 @@ func TestBuildParsedDocuments_WhtClassificationOnlyWhenDataPresent(t *testing.T)
 		for _, iss := range issues {
 			t.Logf("  [%s] %s (docno=%s field=%s)", iss.Severity, iss.Message, iss.Docno, iss.Field)
 		}
+	}
+
+	// Case 2b: VAT behaves identically — a mapped-but-empty vatdocno column
+	// must not demand classification, but a populated one must.
+	jobV1, _, err := jobs.Create(reqCtx)
+	if err != nil {
+		t.Fatalf("job create failed: %v", err)
+	}
+	vatCfg := newCfg()
+	vatCfg.FieldMappings["vatdocno"] = col(7)
+	emptyVat := [][]string{
+		{"VAT-EMPTY-1", "2026-08-01", bookCode, accountCode, "100", "", "", ""},
+		{"VAT-EMPTY-1", "2026-08-01", bookCode, accountCode, "", "100", "", ""},
+	}
+	_, issues = buildParsedDocuments(emptyVat, vatCfg, chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, jobV1, time.Now().Add(time.Hour))
+	vatClassIssues := func(issues []ImportIssue) int {
+		n := 0
+		for _, iss := range issues {
+			if strings.Contains(iss.Message, "มีข้อมูลภาษีมูลค่าเพิ่ม") {
+				n++
+			}
+		}
+		return n
+	}
+	if n := vatClassIssues(issues); n != 0 {
+		t.Errorf("expected no VAT classification issue when every vatdocno cell is empty, got %d", n)
+	}
+
+	jobV2, _, err := jobs.Create(reqCtx)
+	if err != nil {
+		t.Fatalf("job create failed: %v", err)
+	}
+	withVat := [][]string{
+		{"VAT-REAL-1", "2026-08-01", bookCode, accountCode, "100", "", "", "TAXINV-001"},
+		{"VAT-REAL-1", "2026-08-01", bookCode, accountCode, "", "100", "", "TAXINV-001"},
+	}
+	_, issues = buildParsedDocuments(withVat, vatCfg, chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, jobV2, time.Now().Add(time.Hour))
+	if n := vatClassIssues(issues); n == 0 {
+		t.Error("expected VAT classification issues when a row carries a vatdocno but vatMode/vatType/vatOrganization are unset")
 	}
 
 	// Case 3: real WHT data with the classification supplied — no issue.
