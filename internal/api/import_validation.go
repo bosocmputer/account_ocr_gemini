@@ -416,24 +416,35 @@ func validateVatClassification(cfg *ImportValidationConfig) string {
 	return ""
 }
 
-// validateWhtClassification checks WhtTaxType/WhtCustType/WhtConditionType:
-// the first two required together when the batch is mapped to carry WHT
-// data (fieldMappings has a taxdocno column); WhtConditionType is only
-// meaningful when WhtTaxType is 1 (หัก ณ ที่จ่าย) — mirrors the display-side
-// gating in JournalDetailPanel.vue (`v-if="tax.taxtype === 1"` around its
+// validateWhtClassification range-checks WhtTaxType/WhtCustType/WhtConditionType
+// when they are supplied. WhtConditionType is only meaningful when WhtTaxType
+// is 1 (หัก ณ ที่จ่าย) — mirrors the display-side gating in
+// JournalDetailPanel.vue (`v-if="tax.taxtype === 1"` around its
 // conditiontaxtype tag).
+//
+// Deliberately does NOT require WhtTaxType/WhtCustType just because a taxdocno
+// column is mapped. A mapped column is not evidence that the file carries WHT
+// data: the client auto-suggests a mapping from header names alone, so a
+// template whose WHT* headers are present but whose rows are all empty (a real
+// user file: 27 rows, every WHT column blank) would be rejected here before
+// parsing, demanding classification for records that are never built. The
+// per-document builder already gates on the actual cell value
+// (`taxdocnoField.Value != ""`), and that is where the requirement is now
+// enforced — see the WHT block in buildImportDocuments.
 func validateWhtClassification(cfg *ImportValidationConfig) string {
-	hasWhtColumn := cfg.FieldMappings["taxdocno"] != nil
-	if !hasWhtColumn {
+	if cfg.WhtTaxType == nil && cfg.WhtCustType == nil && cfg.WhtConditionType == nil {
 		return ""
 	}
-	if cfg.WhtTaxType == nil || cfg.WhtCustType == nil {
-		return "whtTaxType and whtCustType are required when a taxdocno column is mapped"
+	if cfg.WhtTaxType == nil {
+		if cfg.WhtConditionType != nil {
+			return "whtConditionType is only valid when whtTaxType is 1"
+		}
+		return ""
 	}
 	if *cfg.WhtTaxType != 0 && *cfg.WhtTaxType != 1 {
 		return fmt.Sprintf("whtTaxType must be 0 or 1, got %d", *cfg.WhtTaxType)
 	}
-	if *cfg.WhtCustType < 0 || *cfg.WhtCustType > 4 {
+	if cfg.WhtCustType != nil && (*cfg.WhtCustType < 0 || *cfg.WhtCustType > 4) {
 		return fmt.Sprintf("whtCustType must be 0-4, got %d", *cfg.WhtCustType)
 	}
 	if cfg.WhtConditionType != nil {
@@ -1288,6 +1299,15 @@ func buildParsedDocuments(
 		taxes := []ImportTax{} // never nil — marshals to [] not null, matching the old client-side default
 		if taxdocnoField.HasValue && taxdocnoField.Value != "" {
 			taxdocno := taxdocnoField.Value
+			// This document really does carry WHT data, so the batch-level
+			// classification is now genuinely required — it decides which
+			// ภ.ง.ด. form the record lands on and cannot be inferred per row.
+			// Checked here rather than up front in validateWhtClassification
+			// because only now do we know a record will actually be built
+			// (a mapped-but-empty WHT column must not trigger this).
+			if cfg.WhtTaxType == nil || cfg.WhtCustType == nil {
+				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: taxdocnoField.RowNums, Docno: docno, Field: "taxdocno", Message: "เอกสารนี้มีข้อมูลหัก ณ ที่จ่าย จึงต้องระบุ \"ประเภทหัก ณ ที่จ่าย\" และ \"ประเภทลูกค้า\" ในขั้นจับคู่คอลัมน์ก่อน"})
+			}
 			if taxdocnoField.HasConflict {
 				issues = append(issues, ImportIssue{Severity: "error", RowNumbers: taxdocnoField.RowNums, Docno: docno, Field: "taxdocno", Message: fmt.Sprintf(`เอกสารนี้มีเลขที่หนังสือรับรองหัก ณ ที่จ่ายไม่ตรงกันหลายแถว (แถวที่ %s) — รองรับได้ 1 ใบต่อเอกสาร`, joinInts(taxdocnoField.RowNums))})
 			}

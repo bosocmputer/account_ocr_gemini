@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -71,6 +72,14 @@ func TestBuildParsedDocuments_SampleImportPerLine(t *testing.T) {
 	cfg := ImportValidationConfig{
 		HeaderRowIndex: headerRowIndex,
 		RowMode:        "per-line",
+		// This sample really does carry a หัก ณ ที่จ่าย record (JV-2026-0003),
+		// so the batch-level classification has to be supplied — it decides
+		// which ภ.ง.ด. form that record lands on and has no per-row source.
+		// Previously omitted and unnoticed because the check lived in the
+		// pre-flight config validation, which this test bypasses by calling
+		// buildParsedDocuments directly.
+		WhtTaxType:  ref(0),
+		WhtCustType: ref(0),
 		FieldMappings: map[string]*int{
 			"docno":              col(0),
 			"docdate":            col(1),
@@ -568,10 +577,15 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 		t.Errorf("expected no wizard-level VAT fields required when vatmode/vattype/vatorganization are all mapped, got error: %s", msg)
 	}
 
-	// taxdocno mapped but classification fields missing entirely.
+	// taxdocno mapped but classification fields missing entirely — must NOT
+	// be rejected up front. A mapped column only means the client's header
+	// auto-suggest matched a name; it is not evidence the file carries WHT
+	// data. Real user file: WHT* headers present, all 27 rows blank. The
+	// requirement is enforced per-document instead, once a row is known to
+	// actually carry a taxdocno value (see buildImportDocuments' WHT block).
 	cfg = withWhtCol(ImportValidationConfig{})
-	if msg := validateImportConfig(&cfg); msg == "" {
-		t.Error("expected an error when taxdocno is mapped but whtTaxType/whtCustType are unset")
+	if msg := validateImportConfig(&cfg); msg != "" {
+		t.Errorf("expected a mapped-but-possibly-empty taxdocno column to pass pre-flight, got error: %s", msg)
 	}
 
 	// whtTaxType out of range.
@@ -747,4 +761,122 @@ func loadTestFileDataRows(t *testing.T, path string, headerRowIndex int) ([][]st
 		}
 	}
 	return dataRows, headerRowIndex
+}
+
+// TestBuildParsedDocuments_WhtClassificationOnlyWhenDataPresent pins the
+// distinction that a *mapped* WHT column is not the same as a file that
+// *carries* WHT data.
+//
+// The client auto-suggests a column mapping from header names alone, so a
+// template with WHT* headers whose rows are all blank still arrives with
+// taxdocno mapped. Demanding whtTaxType/whtCustType for such a file blocks
+// the import for records that are never built (the real user file that
+// prompted this: 27 rows, every WHT column empty). Conversely, once a row
+// genuinely carries a taxdocno the classification really is required — it
+// decides which ภ.ง.ด. form the record lands on and has no per-row source.
+func TestBuildParsedDocuments_WhtClassificationOnlyWhenDataPresent(t *testing.T) {
+	shopID := setupLiveDBTest(t)
+	masterCache, err := storage.GetOrLoadMasterData(shopID)
+	if err != nil {
+		t.Fatalf("GetOrLoadMasterData failed: %v", err)
+	}
+
+	chartOfAccountsMap := buildStringKeyedMap(masterCache.Accounts, "accountcode")
+	journalBookMap := buildStringKeyedMap(masterCache.JournalBooks, "code")
+	accountGroupMap := buildStringKeyedMap(masterCache.AccountGroups, "code")
+	debtorMap := buildStringKeyedMap(masterCache.Debtors, "code")
+	creditorMap := buildStringKeyedMap(masterCache.Creditors, "code")
+
+	col := func(i int) *int { v := i; return &v }
+	// cols: 0=docno 1=docdate 2=bookcode 3=accountcode 4=debit 5=credit 6=taxdocno
+	newCfg := func() ImportValidationConfig {
+		return ImportValidationConfig{
+			HeaderRowIndex: 0,
+			RowMode:        "per-line",
+			FieldMappings: map[string]*int{
+				"docno": col(0), "docdate": col(1), "bookcode": col(2),
+				"accountcode": col(3), "debitamount": col(4), "creditamount": col(5),
+				"taxdocno": col(6),
+			},
+		}
+	}
+
+	bookCode := ""
+	for _, b := range masterCache.JournalBooks {
+		if v, ok := b["code"].(string); ok && v != "" {
+			bookCode = v
+			break
+		}
+	}
+	accountCode := ""
+	for _, a := range masterCache.Accounts {
+		if v, ok := a["accountcode"].(string); ok && v != "" {
+			accountCode = v
+			break
+		}
+	}
+	if bookCode == "" || accountCode == "" {
+		t.Skip("shop has no journal book / chart of account to build a valid fixture row")
+	}
+
+	whtIssueCount := func(issues []ImportIssue) int {
+		n := 0
+		for _, iss := range issues {
+			if iss.Field == "taxdocno" && strings.Contains(iss.Message, "ประเภทหัก ณ ที่จ่าย") {
+				n++
+			}
+		}
+		return n
+	}
+
+	reqCtx := common.NewRequestContext(shopID)
+
+	// Case 1: taxdocno mapped, but the column is empty on every row — the
+	// shape of the real user file. Must not demand classification.
+	job1, _, err := jobs.Create(reqCtx)
+	if err != nil {
+		t.Fatalf("job create failed: %v", err)
+	}
+	emptyWht := [][]string{
+		{"WHT-EMPTY-1", "2026-08-01", bookCode, accountCode, "100", "", ""},
+		{"WHT-EMPTY-1", "2026-08-01", bookCode, accountCode, "", "100", ""},
+	}
+	_, issues := buildParsedDocuments(emptyWht, newCfg(), chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, job1, time.Now().Add(time.Hour))
+	if n := whtIssueCount(issues); n != 0 {
+		t.Errorf("expected no WHT classification issue when every taxdocno cell is empty, got %d", n)
+		for _, iss := range issues {
+			t.Logf("  [%s] %s (docno=%s field=%s)", iss.Severity, iss.Message, iss.Docno, iss.Field)
+		}
+	}
+
+	// Case 2: same mapping, but a row actually carries a taxdocno and the
+	// wizard-level classification is still unset — must be reported.
+	job2, _, err := jobs.Create(reqCtx)
+	if err != nil {
+		t.Fatalf("job create failed: %v", err)
+	}
+	withWht := [][]string{
+		{"WHT-REAL-1", "2026-08-01", bookCode, accountCode, "100", "", "WHT-001"},
+		{"WHT-REAL-1", "2026-08-01", bookCode, accountCode, "", "100", "WHT-001"},
+	}
+	_, issues = buildParsedDocuments(withWht, newCfg(), chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, job2, time.Now().Add(time.Hour))
+	if n := whtIssueCount(issues); n == 0 {
+		t.Error("expected a WHT classification issue when a row carries a taxdocno but whtTaxType/whtCustType are unset")
+		for _, iss := range issues {
+			t.Logf("  [%s] %s (docno=%s field=%s)", iss.Severity, iss.Message, iss.Docno, iss.Field)
+		}
+	}
+
+	// Case 3: real WHT data with the classification supplied — no issue.
+	job3, _, err := jobs.Create(reqCtx)
+	if err != nil {
+		t.Fatalf("job create failed: %v", err)
+	}
+	cfg3 := newCfg()
+	cfg3.WhtTaxType = ref(0)
+	cfg3.WhtCustType = ref(0)
+	_, issues = buildParsedDocuments(withWht, cfg3, chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, job3, time.Now().Add(time.Hour))
+	if n := whtIssueCount(issues); n != 0 {
+		t.Errorf("expected no WHT classification issue once whtTaxType/whtCustType are supplied, got %d", n)
+	}
 }
