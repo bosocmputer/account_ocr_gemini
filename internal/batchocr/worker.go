@@ -15,8 +15,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -553,55 +551,6 @@ func handleSuccess(batchID, shopID, guidfixed string, attempt int, result map[st
 		return
 	}
 
-	if cost, ok := extractCostTHB(result); ok {
-		if err := AddCost(batchID, cost); err != nil {
-			log.Printf("[batch %s] item %s: failed to add cost %.4f: %v", batchID, guidfixed, cost, err)
-		}
-	}
-
 	_ = MarkItemDone(batchID, guidfixed)
 	log.Printf("[batch %s] item %s → done (attempt %d)", batchID, guidfixed, attempt)
-}
-
-// extractCostTHB pulls metadata.token_usage.cost_thb (gemini) or
-// metadata.token_usage.total.cost_thb (mistral) out of a RunAnalyzeForBatch
-// result, per plan-clever-lemon.md TODO-6 step 8 — the two providers shape
-// this differently (confirmed against internal/api/handlers.go's response
-// assembly). The value is a string like "฿12.50"; a parse failure here must
-// never fail the item itself, since the OCR result was already successfully
-// written — cost tracking is best-effort on top of that, not a condition of
-// success.
-func extractCostTHB(result map[string]interface{}) (float64, bool) {
-	metadata, ok := api.AsStringMap(result["metadata"])
-	if !ok {
-		return 0, false
-	}
-	tokenUsage, ok := api.AsStringMap(metadata["token_usage"])
-	if !ok {
-		return 0, false
-	}
-
-	raw, ok := tokenUsage["cost_thb"]
-	if !ok {
-		// Mistral shape: metadata.token_usage.total.cost_thb
-		if total, ok := api.AsStringMap(tokenUsage["total"]); ok {
-			raw, ok = total["cost_thb"]
-			if !ok {
-				return 0, false
-			}
-		} else {
-			return 0, false
-		}
-	}
-
-	str, ok := raw.(string)
-	if !ok {
-		return 0, false
-	}
-	str = strings.TrimPrefix(strings.TrimSpace(str), "฿")
-	cost, err := strconv.ParseFloat(str, 64)
-	if err != nil {
-		return 0, false
-	}
-	return cost, true
 }

@@ -30,21 +30,18 @@ var (
 	// Template Matching Configuration
 	TEMPLATE_CONFIDENCE_THRESHOLD float64 // Minimum confidence to use template-only mode (default: 95%)
 
-	// Gemini Pricing Configuration (hardcoded based on official Gemini API pricing)
-	// Reference: https://ai.google.dev/pricing (Updated: January 2026 - PAID TIER)
-	// Gemini 2.5 Flash-Lite (Paid): $0.10 input, $0.40 output per 1M tokens
-	// Gemini 2.5 Flash (Paid): $0.30 input, $2.50 output per 1M tokens
-	// Note: Thinking tokens are billed as INPUT tokens
-	OCR_INPUT_PRICE_PER_MILLION                  = 0.10 // Flash-Lite pricing (Paid tier)
-	OCR_OUTPUT_PRICE_PER_MILLION                 = 0.40 // Flash-Lite pricing (Paid tier)
-	TEMPLATE_INPUT_PRICE_PER_MILLION             = 0.10 // Flash-Lite pricing (Paid tier)
-	TEMPLATE_OUTPUT_PRICE_PER_MILLION            = 0.40 // Flash-Lite pricing (Paid tier)
-	TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION  = 0.10 // Flash-Lite pricing (when template matched ≥95%)
-	TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION = 0.40 // Flash-Lite pricing (when template matched ≥95%)
-	ACCOUNTING_INPUT_PRICE_PER_MILLION           = 0.30 // Flash pricing (when template not matched <95%)
-	ACCOUNTING_OUTPUT_PRICE_PER_MILLION          = 2.50 // Flash pricing INCLUDING THINKING TOKENS
-
-	USD_TO_THB float64 // Exchange rate from .env
+	// No cost/pricing configuration here on purpose.
+	//
+	// This used to hold per-million token rates plus a USD_TO_THB rate, and the
+	// service reported a baht figure per request and per batch. Those rates were
+	// pinned to whichever Gemini model was current when they were written, so
+	// they silently went wrong the moment the model changed — which is exactly
+	// what happened when a key rotation forced prod off Gemini 2.5 (closed to
+	// new API keys) onto 3.1. Google exposes no per-request cost to read back,
+	// so there is no way to make the number authoritative. Reporting a wrong
+	// amount is worse than reporting none: the key owner reads real spend in
+	// Google AI Studio / Cloud Billing. Token counts are still reported — those
+	// come from the API itself and are true.
 
 	// Server Configuration
 	PORT            string
@@ -124,12 +121,6 @@ var (
 	// indexes on, unlike DOCUMENT_IMAGE_GROUP_COLLECTION below.
 	BATCH_OCR_COLLECTION string
 
-	// Rough per-document cost estimate shown to the user before they confirm
-	// a batch run (so a several-hundred-baht button press isn't a surprise).
-	// Adjust from real logged costs over time — this is a starting guess, not
-	// a computed price.
-	BATCH_OCR_EST_COST_PER_DOC_THB float64
-
 	// The MongoDB collection holding document image groups — confirmed via
 	// Mongo Compass to be "documentImageGroups" (camelCase, trailing "s").
 	// This collection belongs to the main API/team, not this service: we
@@ -179,7 +170,6 @@ func LoadConfig() {
 	TEMPLATE_CONFIDENCE_THRESHOLD = getEnvFloat("TEMPLATE_CONFIDENCE_THRESHOLD", 95.0)
 
 	// Exchange rate (customizable via .env)
-	USD_TO_THB = getEnvFloat("USD_TO_THB", 36.0)
 
 	PORT = getEnv("PORT", "8080")
 	UPLOAD_DIR = getEnv("UPLOAD_DIR", "uploads")
@@ -225,7 +215,6 @@ func LoadConfig() {
 	BATCH_OCR_ITEM_TIMEOUT_SEC = getEnvInt("BATCH_OCR_ITEM_TIMEOUT_SEC", 300)
 	BATCH_OCR_STALE_LEASE_SEC = getEnvInt("BATCH_OCR_STALE_LEASE_SEC", 900)
 	BATCH_OCR_COLLECTION = getEnv("BATCH_OCR_COLLECTION", "batch_ocr_runs")
-	BATCH_OCR_EST_COST_PER_DOC_THB = getEnvFloat("BATCH_OCR_EST_COST_PER_DOC_THB", 0.30)
 	DOCUMENT_IMAGE_GROUP_COLLECTION = getEnv("DOCUMENT_IMAGE_GROUP_COLLECTION", "documentImageGroups")
 
 	log.Println("✓ Configuration loaded successfully")

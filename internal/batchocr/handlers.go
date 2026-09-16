@@ -91,14 +91,6 @@ func estimateMinutes(totalDocs int) int {
 	return int(math.Ceil(float64(totalDocs) / 3.0))
 }
 
-func estimateCostTHB(totalDocs int) float64 {
-	// Rounded to satang (2 decimal places) before returning — an unrounded
-	// float here (e.g. 12 * 0.30 = 3.5999999999999996 in float64) would
-	// show up verbatim in the confirm dialog's "~฿3.5999999999999996" text
-	// once the frontend interpolates this response value directly.
-	return math.Round(float64(totalDocs)*configs.BATCH_OCR_EST_COST_PER_DOC_THB*100) / 100
-}
-
 // GetBatchOcrPreviewHandler handles GET /batch-ocr/preview?shopid=&taskguid=.
 // Computes the same eligible/skipped breakdown SubmitBatchOcrHandler would,
 // without creating a run — this is what powers the confirm dialog showing
@@ -124,7 +116,6 @@ func GetBatchOcrPreviewHandler(c *gin.Context) {
 		"skipped_ocr":        summary.SkippedOcr,
 		"skipped_referenced": summary.SkippedReferenced,
 		"estimated_minutes":  estimateMinutes(eligibleCount),
-		"estimated_cost_thb": estimateCostTHB(eligibleCount),
 	})
 }
 
@@ -155,10 +146,9 @@ func SubmitBatchOcrHandler(c *gin.Context) {
 		return
 	} else if active != nil {
 		c.JSON(http.StatusOK, gin.H{
-			"batchid":            active.BatchID,
-			"total":              active.Total,
-			"already_running":    true,
-			"estimated_cost_thb": active.EstimatedCostTHB,
+			"batchid":         active.BatchID,
+			"total":           active.Total,
+			"already_running": true,
 		})
 		return
 	}
@@ -222,8 +212,7 @@ func SubmitBatchOcrHandler(c *gin.Context) {
 	}
 
 	batchID := uuid.New().String()
-	estCost := estimateCostTHB(len(items))
-	run, err := Create(batchID, req.ShopID, req.TaskGuid, req.Model, req.CreatedBy, items, estCost)
+	run, err := Create(batchID, req.ShopID, req.TaskGuid, req.Model, req.CreatedBy, items)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create batch run", "details": err.Error()})
 		return
@@ -237,7 +226,6 @@ func SubmitBatchOcrHandler(c *gin.Context) {
 		"skipped_ocr":        summary.SkippedOcr,
 		"skipped_referenced": summary.SkippedReferenced,
 		"estimated_minutes":  estimateMinutes(run.Total),
-		"estimated_cost_thb": run.EstimatedCostTHB,
 	})
 }
 
@@ -335,24 +323,19 @@ func GetBatchOcrStatusHandler(c *gin.Context) {
 	estimatedRemainingMinutes := estimateMinutes(remainingDocs)
 
 	c.JSON(http.StatusOK, gin.H{
-		"status":          run.Status,
-		"total":           run.Total,
-		"done":            done,
-		"failed":          failed,
-		"skipped":         skipped,
-		"pending":         pending,
-		"processing":      processing,
-		"percent":         percent,
-		"model":           run.Model,
-		"createdat":       run.CreatedAt,
-		"finishedat":      run.FinishedAt,
-		"cancelrequested": run.CancelRequested,
-		"cancelreason":    run.CancelReason,
-		// Rounded to satang for the same reason estimated_cost_thb is: this
-		// is accumulated with $inc across many items, so float64 drift shows
-		// up verbatim in the UI (e.g. 3.4199999999999995) once the frontend
-		// interpolates it into "ใช้ไป ฿...".
-		"total_cost_thb":              math.Round(run.TotalCostTHB*100) / 100,
+		"status":                      run.Status,
+		"total":                       run.Total,
+		"done":                        done,
+		"failed":                      failed,
+		"skipped":                     skipped,
+		"pending":                     pending,
+		"processing":                  processing,
+		"percent":                     percent,
+		"model":                       run.Model,
+		"createdat":                   run.CreatedAt,
+		"finishedat":                  run.FinishedAt,
+		"cancelrequested":             run.CancelRequested,
+		"cancelreason":                run.CancelReason,
 		"failed_items":                failedItems,
 		"failed_truncated":            failedTruncated,
 		"estimated_remaining_minutes": estimatedRemainingMinutes,

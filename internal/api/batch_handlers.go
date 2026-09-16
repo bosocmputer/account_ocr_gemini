@@ -96,7 +96,7 @@ func RunAnalyzeForBatch(shopID, model string, imgRefs []ImageReference, masterCa
 // assertion against the unnamed map[string]interface{} fails for a gin.H
 // value even though their underlying representation is identical. Every
 // caller that walks into RunAnalyzeForBatch's result (e.g.
-// internal/batchocr's worker extracting metadata.token_usage.cost_thb) hits
+// internal/batchocr's worker reading the result metadata) hits
 // this at every nesting level, not just the top one that RunAnalyzeForBatch
 // itself already unwraps — so this helper is here rather than only inlined
 // once.

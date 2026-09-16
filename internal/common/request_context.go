@@ -7,7 +7,6 @@ import (
 	"log"
 	"time"
 
-	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/google/uuid"
 )
 
@@ -46,16 +45,14 @@ type SubStepLog struct {
 
 // TokenUsage tracks API token consumption
 type TokenUsage struct {
-	InputTokens  int     `json:"input_tokens"`
-	OutputTokens int     `json:"output_tokens"`
-	TotalTokens  int     `json:"total_tokens"`
-	CostUSD      float64 `json:"cost_usd"`
-	CostTHB      float64 `json:"cost_thb"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
 }
 
-// Pricing is now loaded from configs package to support different models
-// Gemini 2.5 Flash-Lite: Input=$0.10, Output=$0.40
-// Gemini 2.5 Flash: Input=$0.30, Output=$2.50
+// No cost fields, and no pricing table behind them — see the comment in
+// configs/config.go for why a self-computed baht figure was removed rather
+// than repaired. Token counts below come straight from the provider.
 
 // NewRequestContext creates a new request tracking context
 func NewRequestContext(shopID string) *RequestContext {
@@ -119,11 +116,9 @@ func (rc *RequestContext) EndStep(status string, tokens *TokenUsage, err error) 
 			rc.TotalTokens.InputTokens += tokens.InputTokens
 			rc.TotalTokens.OutputTokens += tokens.OutputTokens
 			rc.TotalTokens.TotalTokens += tokens.TotalTokens
-			rc.TotalTokens.CostUSD += tokens.CostUSD
-			rc.TotalTokens.CostTHB += tokens.CostTHB
 
-			logMsg += fmt.Sprintf(" | 🪙 Tokens: %dเข้า + %dออก = %d | 💰 ค่าใช้จ่าย: ฿%.2f",
-				tokens.InputTokens, tokens.OutputTokens, tokens.TotalTokens, tokens.CostTHB)
+			logMsg += fmt.Sprintf(" | 🪙 Tokens: %dเข้า + %dออก = %d",
+				tokens.InputTokens, tokens.OutputTokens, tokens.TotalTokens)
 		}
 
 		// Log sub-steps summary if any
@@ -149,75 +144,39 @@ func CalculateTokenCost(inputTokens, outputTokens int) TokenUsage {
 
 // CalculateOCRTokenCost calculates cost for Phase 1 (OCR) using OCR-specific pricing
 func CalculateOCRTokenCost(inputTokens, outputTokens int) TokenUsage {
-	totalTokens := inputTokens + outputTokens
-
-	inputCost := float64(inputTokens) * configs.OCR_INPUT_PRICE_PER_MILLION / 1_000_000
-	outputCost := float64(outputTokens) * configs.OCR_OUTPUT_PRICE_PER_MILLION / 1_000_000
-	costUSD := inputCost + outputCost
-	costTHB := costUSD * configs.USD_TO_THB
-
 	return TokenUsage{
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
-		TotalTokens:  totalTokens,
-		CostUSD:      costUSD,
-		CostTHB:      costTHB,
+		TotalTokens:  inputTokens + outputTokens,
 	}
 }
 
 // CalculateTemplateTokenCost calculates cost for Phase 2 (Template Matching)
 func CalculateTemplateTokenCost(inputTokens, outputTokens int) TokenUsage {
-	totalTokens := inputTokens + outputTokens
-
-	inputCost := float64(inputTokens) * configs.TEMPLATE_INPUT_PRICE_PER_MILLION / 1_000_000
-	outputCost := float64(outputTokens) * configs.TEMPLATE_OUTPUT_PRICE_PER_MILLION / 1_000_000
-	costUSD := inputCost + outputCost
-	costTHB := costUSD * configs.USD_TO_THB
-
 	return TokenUsage{
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
-		TotalTokens:  totalTokens,
-		CostUSD:      costUSD,
-		CostTHB:      costTHB,
+		TotalTokens:  inputTokens + outputTokens,
 	}
 }
 
 // CalculateTemplateAccountingTokenCost calculates cost for Phase 3 (Template-only mode)
 // Uses Flash-Lite pricing (faster & cheaper for high-confidence template matches)
 func CalculateTemplateAccountingTokenCost(inputTokens, outputTokens int) TokenUsage {
-	totalTokens := inputTokens + outputTokens
-
-	inputCost := float64(inputTokens) * configs.TEMPLATE_ACCOUNTING_INPUT_PRICE_PER_MILLION / 1_000_000
-	outputCost := float64(outputTokens) * configs.TEMPLATE_ACCOUNTING_OUTPUT_PRICE_PER_MILLION / 1_000_000
-	costUSD := inputCost + outputCost
-	costTHB := costUSD * configs.USD_TO_THB
-
 	return TokenUsage{
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
-		TotalTokens:  totalTokens,
-		CostUSD:      costUSD,
-		CostTHB:      costTHB,
+		TotalTokens:  inputTokens + outputTokens,
 	}
 }
 
 // CalculateAccountingTokenCost calculates cost for Phase 3 (Full analysis mode)
 // Uses Flash pricing (better reasoning for low-confidence or complex cases)
 func CalculateAccountingTokenCost(inputTokens, outputTokens int) TokenUsage {
-	totalTokens := inputTokens + outputTokens
-
-	inputCost := float64(inputTokens) * configs.ACCOUNTING_INPUT_PRICE_PER_MILLION / 1_000_000
-	outputCost := float64(outputTokens) * configs.ACCOUNTING_OUTPUT_PRICE_PER_MILLION / 1_000_000
-	costUSD := inputCost + outputCost
-	costTHB := costUSD * configs.USD_TO_THB
-
 	return TokenUsage{
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
-		TotalTokens:  totalTokens,
-		CostUSD:      costUSD,
-		CostTHB:      costTHB,
+		TotalTokens:  inputTokens + outputTokens,
 	}
 }
 
@@ -242,8 +201,6 @@ func (rc *RequestContext) GetSummary() map[string]interface{} {
 				"input_tokens":  step.Tokens.InputTokens,
 				"output_tokens": step.Tokens.OutputTokens,
 				"total_tokens":  step.Tokens.TotalTokens,
-				"cost_usd":      step.Tokens.CostUSD,
-				"cost_thb":      step.Tokens.CostTHB,
 			})
 		}
 	}
@@ -261,8 +218,6 @@ func (rc *RequestContext) GetSummary() map[string]interface{} {
 			"input_tokens":  rc.TotalTokens.InputTokens,
 			"output_tokens": rc.TotalTokens.OutputTokens,
 			"total_tokens":  rc.TotalTokens.TotalTokens,
-			"cost_usd":      fmt.Sprintf("$%.4f", rc.TotalTokens.CostUSD),
-			"cost_thb":      fmt.Sprintf("฿%.2f", rc.TotalTokens.CostTHB),
 		},
 	}
 
@@ -282,41 +237,17 @@ func (rc *RequestContext) GetSummary() map[string]interface{} {
 			phase["input_tokens"],
 			phase["output_tokens"],
 			phase["total_tokens"])
-		log.Printf("[%s]    └─ Cost: $%.6f USD (฿%.4f THB)",
-			rc.RequestID,
-			phase["cost_usd"],
-			phase["cost_thb"])
 	}
 
 	log.Printf("[%s] ", rc.RequestID)
 	log.Printf("[%s] ───────────────────────────────────────────────────", rc.RequestID)
-	log.Printf("[%s] 💰 สรุปค่าใช้จ่ายรวม:", rc.RequestID)
+	log.Printf("[%s] 🪙 สรุปการใช้ Token:", rc.RequestID)
 	log.Printf("[%s]    ├─ Total Input Tokens:  %s", rc.RequestID, formatNumber(rc.TotalTokens.InputTokens))
 	log.Printf("[%s]    ├─ Total Output Tokens: %s", rc.RequestID, formatNumber(rc.TotalTokens.OutputTokens))
-	log.Printf("[%s]    ├─ Total Tokens: %s", rc.RequestID, formatNumber(rc.TotalTokens.TotalTokens))
-	log.Printf("[%s]    ├─ Total Cost USD: $%.6f", rc.RequestID, rc.TotalTokens.CostUSD)
-	log.Printf("[%s]    └─ Total Cost THB: ฿%.4f", rc.RequestID, rc.TotalTokens.CostTHB)
+	log.Printf("[%s]    └─ Total Tokens: %s", rc.RequestID, formatNumber(rc.TotalTokens.TotalTokens))
 	log.Printf("[%s] ", rc.RequestID)
-	log.Printf("[%s] 💳 Google Cloud Billing - ค่าใช้จ่ายที่ต้องจ่ายจริง:", rc.RequestID)
-	log.Printf("[%s]    ├─ Gemini API (console.cloud.google.com/billing)", rc.RequestID)
-	log.Printf("[%s]    ├─ Input:  %s tokens × $%.4f/1M = $%.6f USD",
-		rc.RequestID,
-		formatNumber(rc.TotalTokens.InputTokens),
-		getAverageInputPrice(phaseDetails),
-		calculateInputCost(phaseDetails))
-	log.Printf("[%s]    ├─ Output: %s tokens × $%.4f/1M = $%.6f USD",
-		rc.RequestID,
-		formatNumber(rc.TotalTokens.OutputTokens),
-		getAverageOutputPrice(phaseDetails),
-		calculateOutputCost(phaseDetails))
-	log.Printf("[%s]    ├─ Subtotal USD: $%.6f (รวม Input + Output)", rc.RequestID, rc.TotalTokens.CostUSD)
-	log.Printf("[%s]    └─ Subtotal THB: ฿%.4f (อัตราแลกเปลี่ยน 1 USD = %.2f THB)",
-		rc.RequestID, rc.TotalTokens.CostTHB, configs.USD_TO_THB)
-	log.Printf("[%s] ", rc.RequestID)
-	log.Printf("[%s] 📌 หมายเหตุ:", rc.RequestID)
-	log.Printf("[%s]    • Mistral OCR = เหมาจ่าย (ไม่คิดตาม tokens)", rc.RequestID)
-	log.Printf("[%s]    • Gemini ทุก Phase = จ่ายตามจริง (ตรงกับ Google Billing)", rc.RequestID)
-	log.Printf("[%s]    • Thinking tokens = นับรวมใน Input tokens", rc.RequestID)
+	log.Printf("[%s] 📌 ค่าใช้จ่ายจริงดูที่ Google AI Studio / Cloud Billing", rc.RequestID)
+	log.Printf("[%s]    (บริการนี้ไม่คำนวณค่าเงินเอง — ดูเหตุผลใน configs/config.go)", rc.RequestID)
 	log.Printf("[%s] ═══════════════════════════════════════════════════", rc.RequestID)
 	log.Printf("[%s] ⏱️  เวลารวมทั้งหมด: %.2f วินาที", rc.RequestID, float64(totalDuration)/1000)
 	log.Printf("[%s] ═══════════════════════════════════════════════════", rc.RequestID)
@@ -419,96 +350,4 @@ func formatNumber(n int) string {
 		return fmt.Sprintf("%d,%03d", n/1000, n%1000)
 	}
 	return fmt.Sprintf("%d,%03d,%03d", n/1000000, (n%1000000)/1000, n%1000)
-}
-
-// Helper functions for detailed cost calculation
-
-// getAverageInputPrice calculates weighted average input token price across all phases
-func getAverageInputPrice(phaseDetails []map[string]interface{}) float64 {
-	if len(phaseDetails) == 0 {
-		return 0
-	}
-
-	totalInputTokens := 0
-	totalInputCost := 0.0
-
-	for _, phase := range phaseDetails {
-		inputTokens := phase["input_tokens"].(int)
-		costUSD := phase["cost_usd"].(float64)
-
-		totalInputTokens += inputTokens
-		// Calculate input portion of cost (proportional to input tokens)
-		outputTokens := phase["output_tokens"].(int)
-		if inputTokens+outputTokens > 0 {
-			inputRatio := float64(inputTokens) / float64(inputTokens+outputTokens)
-			totalInputCost += costUSD * inputRatio
-		}
-	}
-
-	if totalInputTokens == 0 {
-		return 0
-	}
-
-	return (totalInputCost / float64(totalInputTokens)) * 1_000_000 // Convert to per 1M
-}
-
-// getAverageOutputPrice calculates weighted average output token price across all phases
-func getAverageOutputPrice(phaseDetails []map[string]interface{}) float64 {
-	if len(phaseDetails) == 0 {
-		return 0
-	}
-
-	totalOutputTokens := 0
-	totalOutputCost := 0.0
-
-	for _, phase := range phaseDetails {
-		outputTokens := phase["output_tokens"].(int)
-		costUSD := phase["cost_usd"].(float64)
-
-		totalOutputTokens += outputTokens
-		// Calculate output portion of cost
-		inputTokens := phase["input_tokens"].(int)
-		if inputTokens+outputTokens > 0 {
-			outputRatio := float64(outputTokens) / float64(inputTokens+outputTokens)
-			totalOutputCost += costUSD * outputRatio
-		}
-	}
-
-	if totalOutputTokens == 0 {
-		return 0
-	}
-
-	return (totalOutputCost / float64(totalOutputTokens)) * 1_000_000 // Convert to per 1M
-}
-
-// calculateInputCost calculates total input cost from phase details
-func calculateInputCost(phaseDetails []map[string]interface{}) float64 {
-	totalCost := 0.0
-	for _, phase := range phaseDetails {
-		inputTokens := phase["input_tokens"].(int)
-		costUSD := phase["cost_usd"].(float64)
-		outputTokens := phase["output_tokens"].(int)
-
-		if inputTokens+outputTokens > 0 {
-			inputRatio := float64(inputTokens) / float64(inputTokens+outputTokens)
-			totalCost += costUSD * inputRatio
-		}
-	}
-	return totalCost
-}
-
-// calculateOutputCost calculates total output cost from phase details
-func calculateOutputCost(phaseDetails []map[string]interface{}) float64 {
-	totalCost := 0.0
-	for _, phase := range phaseDetails {
-		outputTokens := phase["output_tokens"].(int)
-		costUSD := phase["cost_usd"].(float64)
-		inputTokens := phase["input_tokens"].(int)
-
-		if inputTokens+outputTokens > 0 {
-			outputRatio := float64(outputTokens) / float64(inputTokens+outputTokens)
-			totalCost += costUSD * outputRatio
-		}
-	}
-	return totalCost
 }

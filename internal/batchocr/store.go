@@ -57,28 +57,25 @@ type BatchItem struct {
 	ErrorMessage string     `bson:"errormessage,omitempty"`
 	StartedAt    *time.Time `bson:"startedat,omitempty"`
 	FinishedAt   *time.Time `bson:"finishedat,omitempty"`
-	CostTHB      float64    `bson:"costthb"`
 }
 
 // BatchRun tracks one batch OCR run for one task.
 type BatchRun struct {
-	BatchID          string      `bson:"batchid"`
-	ShopID           string      `bson:"shopid"`
-	TaskGuid         string      `bson:"taskguid"`
-	Model            string      `bson:"model"`
-	Status           string      `bson:"status"`
-	OwnerInstance    string      `bson:"ownerinstance"`
-	LeaseExpiresAt   time.Time   `bson:"leaseexpiresat"`
-	Total            int         `bson:"total"`
-	EstimatedCostTHB float64     `bson:"estimatedcostthb"`
-	TotalCostTHB     float64     `bson:"totalcostthb"`
-	CreatedAt        time.Time   `bson:"createdat"`
-	CreatedBy        string      `bson:"createdby"`
-	UpdatedAt        time.Time   `bson:"updatedat"`
-	FinishedAt       *time.Time  `bson:"finishedat,omitempty"`
-	CancelRequested  bool        `bson:"cancelrequested"`
-	CancelReason     string      `bson:"cancelreason,omitempty"`
-	Items            []BatchItem `bson:"items"`
+	BatchID         string      `bson:"batchid"`
+	ShopID          string      `bson:"shopid"`
+	TaskGuid        string      `bson:"taskguid"`
+	Model           string      `bson:"model"`
+	Status          string      `bson:"status"`
+	OwnerInstance   string      `bson:"ownerinstance"`
+	LeaseExpiresAt  time.Time   `bson:"leaseexpiresat"`
+	Total           int         `bson:"total"`
+	CreatedAt       time.Time   `bson:"createdat"`
+	CreatedBy       string      `bson:"createdby"`
+	UpdatedAt       time.Time   `bson:"updatedat"`
+	FinishedAt      *time.Time  `bson:"finishedat,omitempty"`
+	CancelRequested bool        `bson:"cancelrequested"`
+	CancelReason    string      `bson:"cancelreason,omitempty"`
+	Items           []BatchItem `bson:"items"`
 }
 
 func collection() *mongo.Collection {
@@ -117,24 +114,23 @@ func EnsureIndexes() error {
 // Create inserts a new batch run in "queued" status with all items
 // "pending". Rejects more than maxItemsHardCap items regardless of what
 // BATCH_OCR_MAX_ITEMS is configured to — see that constant's comment.
-func Create(batchID, shopID, taskGuid, model, createdBy string, items []BatchItem, estimatedCostTHB float64) (*BatchRun, error) {
+func Create(batchID, shopID, taskGuid, model, createdBy string, items []BatchItem) (*BatchRun, error) {
 	if len(items) > maxItemsHardCap {
 		return nil, fmt.Errorf("batch of %d items exceeds hard cap of %d", len(items), maxItemsHardCap)
 	}
 
 	now := time.Now()
 	run := &BatchRun{
-		BatchID:          batchID,
-		ShopID:           shopID,
-		TaskGuid:         taskGuid,
-		Model:            model,
-		Status:           StatusQueued,
-		Total:            len(items),
-		EstimatedCostTHB: estimatedCostTHB,
-		CreatedAt:        now,
-		CreatedBy:        createdBy,
-		UpdatedAt:        now,
-		Items:            items,
+		BatchID:   batchID,
+		ShopID:    shopID,
+		TaskGuid:  taskGuid,
+		Model:     model,
+		Status:    StatusQueued,
+		Total:     len(items),
+		CreatedAt: now,
+		CreatedBy: createdBy,
+		UpdatedAt: now,
+		Items:     items,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -529,27 +525,6 @@ func IsCancelRequested(batchID string) (bool, error) {
 		return false, fmt.Errorf("failed to check cancel flag for batch %s: %w", batchID, err)
 	}
 	return run.CancelRequested, nil
-}
-
-// AddCost accumulates the real, logged AI cost onto a run's running total —
-// separate from EstimatedCostTHB (the pre-run guess shown before the user
-// confirms). $inc rather than read-then-write so concurrent item completions
-// within the same run never lose an update to a race.
-func AddCost(batchID string, costTHB float64) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	_, err := collection().UpdateOne(ctx,
-		bson.M{"batchid": batchID},
-		bson.M{
-			"$inc": bson.M{"totalcostthb": costTHB},
-			"$set": bson.M{"updatedat": time.Now()},
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to add cost to batch %s: %w", batchID, err)
-	}
-	return nil
 }
 
 // ClaimOrphanedRuns atomically claims every run whose lease has expired (or

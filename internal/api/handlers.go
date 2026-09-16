@@ -905,8 +905,6 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 			totalPureOCRTokens.InputTokens += pureOCRTokens.InputTokens
 			totalPureOCRTokens.OutputTokens += pureOCRTokens.OutputTokens
 			totalPureOCRTokens.TotalTokens += pureOCRTokens.TotalTokens
-			totalPureOCRTokens.CostUSD += pureOCRTokens.CostUSD
-			totalPureOCRTokens.CostTHB += pureOCRTokens.CostTHB
 		}
 	}
 
@@ -1572,19 +1570,12 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 			"ocr_usage": gin.H{
 				"provider":        "mistral",
 				"pages_processed": totalPureOCRTokens.InputTokens, // pages stored as input_tokens
-				"cost_thb":        fmt.Sprintf("฿%.2f", totalPureOCRTokens.CostTHB),
-				"cost_usd":        fmt.Sprintf("$%.6f", totalPureOCRTokens.CostUSD),
 			},
 			"ai_processing": gin.H{
 				"provider":      "gemini",
 				"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"].(int) - totalPureOCRTokens.InputTokens,
 				"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
 				"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
-				"cost_thb":      fmt.Sprintf("฿%.2f", reqCtx.TotalTokens.CostTHB-totalPureOCRTokens.CostTHB),
-			},
-			"total": gin.H{
-				"cost_thb": summary["token_usage"].(map[string]interface{})["cost_thb"],
-				"cost_usd": summary["token_usage"].(map[string]interface{})["cost_usd"],
 			},
 		}
 	} else {
@@ -1594,7 +1585,6 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 			"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
 			"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
 			"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
-			"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
 		}
 	}
 	// Add OCR warnings if any issues were detected
@@ -2122,7 +2112,6 @@ func runTestTemplatePipeline(job *jobs.Job, shopID, model string, template bson.
 				"input_tokens":  summary["token_usage"].(map[string]interface{})["input_tokens"],
 				"output_tokens": summary["token_usage"].(map[string]interface{})["output_tokens"],
 				"total_tokens":  summary["token_usage"].(map[string]interface{})["total_tokens"],
-				"cost_thb":      summary["token_usage"].(map[string]interface{})["cost_thb"],
 			},
 		},
 
@@ -2144,10 +2133,9 @@ func runTestTemplatePipeline(job *jobs.Job, shopID, model string, template bson.
 	}
 
 	reqCtx.LogInfo("═══ 🎯 สรุปผล (Test Mode) ═══")
-	reqCtx.LogInfo("⏱️  เวลารวม: %.2fวินาที | 🪙 Tokens: %s | 💰 ค่าใช้จ่าย: %s",
+	reqCtx.LogInfo("⏱️  เวลารวม: %.2fวินาที | 🪙 Tokens: %s",
 		summary["total_duration_sec"],
-		formatTokenSummary(summary["token_usage"].(map[string]interface{})),
-		summary["token_usage"].(map[string]interface{})["cost_thb"])
+		formatTokenSummary(summary["token_usage"].(map[string]interface{})))
 	reqCtx.LogInfo("✅ ทดสอบเทมเพลต: '%s' สำเร็จ", templateName)
 	reqCtx.LogInfo("═══════════════════════════")
 

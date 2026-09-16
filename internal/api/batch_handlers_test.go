@@ -84,8 +84,13 @@ func TestRunAnalyzeForBatch_RealDocument(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected metadata.token_usage to be a map, got %T", metadata["token_usage"])
 	}
-	if _, ok := tokenUsage["cost_thb"]; !ok {
-		t.Errorf("expected metadata.token_usage.cost_thb for gemini provider, got keys: %v", keysOf(tokenUsage))
+	// Token counts, not money: the service no longer computes a baht figure
+	// (see configs/config.go for why), so the response carries usage only.
+	if _, ok := tokenUsage["total_tokens"]; !ok {
+		t.Errorf("expected metadata.token_usage.total_tokens for gemini provider, got keys: %v", keysOf(tokenUsage))
+	}
+	if _, ok := tokenUsage["cost_thb"]; ok {
+		t.Errorf("cost_thb must no longer be reported, got keys: %v", keysOf(tokenUsage))
 	}
 }
 

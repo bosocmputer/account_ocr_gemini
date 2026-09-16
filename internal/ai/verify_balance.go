@@ -164,7 +164,7 @@ func VerifyAndCorrectBalance(entries []VerifyEntry, reqCtx *common.RequestContex
 			inputTokens += int(thoughtTokens)
 		}
 		tokens := common.CalculateTemplateAccountingTokenCost(inputTokens, int(resp.UsageMetadata.CandidatesTokenCount))
-		reqCtx.LogInfo("💰 Balance verification cost: ฿%.4f (%d input + %d output tokens)", tokens.CostTHB, tokens.InputTokens, tokens.OutputTokens)
+		reqCtx.LogInfo("🪙 Balance verification: %d input + %d output tokens", tokens.InputTokens, tokens.OutputTokens)
 		tokenUsage = &tokens
 	}
 

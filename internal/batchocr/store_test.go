@@ -63,7 +63,7 @@ func TestCreate_GetByID_FullLifecycle(t *testing.T) {
 		{GuidFixed: "g2", Title: "doc2", Status: ItemPending},
 	}
 
-	run, err := Create(batchID, testShopID, "task-fixture", "gemini", "tester", items, 0.60)
+	run, err := Create(batchID, testShopID, "task-fixture", "gemini", "tester", items)
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -102,9 +102,6 @@ func TestCreate_GetByID_FullLifecycle(t *testing.T) {
 	if err := MarkItemDone(batchID, "g1"); err != nil {
 		t.Fatalf("MarkItemDone failed: %v", err)
 	}
-	if err := AddCost(batchID, 0.35); err != nil {
-		t.Fatalf("AddCost failed: %v", err)
-	}
 	if err := MarkItemFailed(batchID, "g2", "download_failed", "boom"); err != nil {
 		t.Fatalf("MarkItemFailed failed: %v", err)
 	}
@@ -125,9 +122,6 @@ func TestCreate_GetByID_FullLifecycle(t *testing.T) {
 	}
 	if byGuid["g2"].ErrorCode != "download_failed" {
 		t.Errorf("expected g2 errorcode %q, got %q", "download_failed", byGuid["g2"].ErrorCode)
-	}
-	if fetched.TotalCostTHB != 0.35 {
-		t.Errorf("expected TotalCostTHB=0.35, got %v", fetched.TotalCostTHB)
 	}
 
 	// --- reset for retry ---
@@ -194,7 +188,7 @@ func TestMarkRunning_TransitionsFromQueued(t *testing.T) {
 	batchID := newTestBatchID(t)
 
 	run, err := Create(batchID, testShopID, "task-fixture", "gemini", "tester",
-		[]BatchItem{{GuidFixed: "g1", Status: ItemPending}}, 0)
+		[]BatchItem{{GuidFixed: "g1", Status: ItemPending}})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
@@ -235,7 +229,7 @@ func TestFindActiveByTask(t *testing.T) {
 	}
 
 	if _, err := Create(batchID, testShopID, taskGuid, "gemini", "tester",
-		[]BatchItem{{GuidFixed: "g1", Status: ItemPending}}, 0.30); err != nil {
+		[]BatchItem{{GuidFixed: "g1", Status: ItemPending}}); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 
@@ -269,7 +263,7 @@ func TestCreate_RejectsOverHardCap(t *testing.T) {
 		items[i] = BatchItem{GuidFixed: fmt.Sprintf("g%d", i), Status: ItemPending}
 	}
 
-	_, err := Create(batchID, testShopID, "task-fixture", "gemini", "tester", items, 0)
+	_, err := Create(batchID, testShopID, "task-fixture", "gemini", "tester", items)
 	if err == nil {
 		t.Fatal("expected Create to reject a batch over the hard cap")
 	}
@@ -290,7 +284,7 @@ func TestClaimOrphanedRuns_ConcurrentCallersGetDisjointRuns(t *testing.T) {
 	for i := 0; i < numRuns; i++ {
 		batchIDs[i] = newTestBatchID(t)
 		run, err := Create(batchIDs[i], testShopID, "task-fixture", "gemini", "tester",
-			[]BatchItem{{GuidFixed: "g1", Status: ItemPending}}, 0)
+			[]BatchItem{{GuidFixed: "g1", Status: ItemPending}})
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
@@ -353,7 +347,7 @@ func TestClaimOrphanedRuns_DoesNotClaimFreshLease(t *testing.T) {
 	batchID := newTestBatchID(t)
 
 	if _, err := Create(batchID, testShopID, "task-fixture", "gemini", "tester",
-		[]BatchItem{{GuidFixed: "g1", Status: ItemPending}}, 0); err != nil {
+		[]BatchItem{{GuidFixed: "g1", Status: ItemPending}}); err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
 	// Give it a healthy, far-future lease as if an active worker just sent a

@@ -15,7 +15,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/bosocmputer/account_ocr_gemini/internal/common"
 	"github.com/bosocmputer/account_ocr_gemini/internal/processor"
 )
@@ -199,22 +198,17 @@ func (m *MistralProvider) ProcessPureOCR(imagePath string, reqCtx *common.Reques
 		}
 	}
 
-	// Step 6: Calculate costs
-	// Mistral OCR 3: $2 per 1,000 pages
+	// Step 6: Record usage (pages, not tokens — Mistral OCR bills per page).
+	// No money is computed here; see configs/config.go for why.
 	pagesProcessed := response.UsageInfo.PagesProcessed
-	costPerPage := 0.002 // $2 / 1000 = $0.002 per page
-	totalCostUSD := float64(pagesProcessed) * costPerPage
-	totalCostTHB := totalCostUSD * configs.USD_TO_THB
 
 	tokenUsage := &common.TokenUsage{
 		InputTokens:  pagesProcessed, // Store pages as "tokens" for compatibility
 		OutputTokens: 0,
 		TotalTokens:  pagesProcessed,
-		CostUSD:      totalCostUSD,
-		CostTHB:      totalCostTHB,
 	}
 
-	reqCtx.LogInfo("💰 Cost: %d page(s) × $%.3f = $%.6f USD (%.2f THB)", pagesProcessed, costPerPage, totalCostUSD, totalCostTHB)
+	reqCtx.LogInfo("🪙 Mistral OCR: %d page(s) processed", pagesProcessed)
 
 	// Step 7: Build result
 	result := &SimpleOCRResult{
