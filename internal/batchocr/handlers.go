@@ -84,6 +84,19 @@ func computeEligibility(shopID, taskGuid string) (*eligibilitySummary, error) {
 // 2-4 calls), so ~3 documents/minute is used as the planning assumption.
 // Better to under-promise here than have a user think a batch is stuck when
 // it's actually on schedule.
+// capEligible keeps at most max documents (in their existing order) for one run and reports how many were left
+// out, so a task with more documents than the per-run limit is read in rounds instead of being refused outright.
+// max is clamped to [1, maxItemsHardCap] so a bad BATCH_OCR_MAX_ITEMS (0, negative, huge) cannot disable the cap.
+func capEligible(eligible []storage.DocumentImageGroupRef, max int) (kept []storage.DocumentImageGroupRef, left int) {
+	if max <= 0 || max > maxItemsHardCap {
+		max = maxItemsHardCap
+	}
+	if len(eligible) <= max {
+		return eligible, 0
+	}
+	return eligible[:max], len(eligible) - max
+}
+
 func estimateMinutes(totalDocs int) int {
 	if totalDocs <= 0 {
 		return 0
@@ -111,11 +124,15 @@ func GetBatchOcrPreviewHandler(c *gin.Context) {
 	}
 
 	eligibleCount := len(summary.Eligible)
+	kept, left := capEligible(summary.Eligible, configs.BATCH_OCR_MAX_ITEMS)
 	c.JSON(http.StatusOK, gin.H{
 		"eligible":           eligibleCount,
+		"will_process":       len(kept), // read in this run; the rest (remaining) need another run
+		"remaining":          left,
+		"max_items":          configs.BATCH_OCR_MAX_ITEMS,
 		"skipped_ocr":        summary.SkippedOcr,
 		"skipped_referenced": summary.SkippedReferenced,
-		"estimated_minutes":  estimateMinutes(eligibleCount),
+		"estimated_minutes":  estimateMinutes(len(kept)),
 	})
 }
 
@@ -181,15 +198,9 @@ func SubmitBatchOcrHandler(c *gin.Context) {
 		return
 	}
 
-	if len(summary.Eligible) > configs.BATCH_OCR_MAX_ITEMS {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":     "too_many_documents",
-			"message":   fmt.Sprintf("มีเอกสารที่ต้องอ่าน %d รายการ เกินขีดจำกัด %d รายการต่อ batch", len(summary.Eligible), configs.BATCH_OCR_MAX_ITEMS),
-			"eligible":  len(summary.Eligible),
-			"max_items": configs.BATCH_OCR_MAX_ITEMS,
-		})
-		return
-	}
+	// More documents than the per-run limit: take the first max_items now and report how many are left,
+	// rather than refusing the whole task (the user re-runs after this batch; already-read documents are skipped).
+	eligible, remaining := capEligible(summary.Eligible, configs.BATCH_OCR_MAX_ITEMS)
 
 	// Master data must exist before we accept the run at all — same
 	// fail-fast reasoning as SubmitAnalyzeReceiptHandler (handlers.go).
@@ -206,8 +217,8 @@ func SubmitBatchOcrHandler(c *gin.Context) {
 		return
 	}
 
-	items := make([]BatchItem, len(summary.Eligible))
-	for i, g := range summary.Eligible {
+	items := make([]BatchItem, len(eligible))
+	for i, g := range eligible {
 		items[i] = BatchItem{GuidFixed: g.GuidFixed, Title: g.Title, Status: ItemPending}
 	}
 
@@ -223,6 +234,8 @@ func SubmitBatchOcrHandler(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{
 		"batchid":            run.BatchID,
 		"total":              run.Total,
+		"remaining":          remaining,
+		"max_items":          configs.BATCH_OCR_MAX_ITEMS,
 		"skipped_ocr":        summary.SkippedOcr,
 		"skipped_referenced": summary.SkippedReferenced,
 		"estimated_minutes":  estimateMinutes(run.Total),

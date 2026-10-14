@@ -98,7 +98,7 @@ var (
 	// instead.
 	BATCH_OCR_ENABLED     bool // emergency kill switch for the whole feature
 	BATCH_OCR_CONCURRENCY int  // documents processed in parallel per batch run — keep low, see note above
-	BATCH_OCR_MAX_ITEMS   int  // hard cap on documents accepted into one batch run
+	BATCH_OCR_MAX_ITEMS   int  // max documents read per batch run (default 500); a larger task is read in rounds, see capEligible
 
 	// Delay between documents within a batch, so a long-running batch doesn't
 	// starve interactive users of the same shared rate-limit budget.
@@ -209,7 +209,7 @@ func LoadConfig() {
 	// "AI วิเคราะห์" button people use while the batch runs, and starving
 	// those users matters more than finishing the batch ~40% sooner.
 	BATCH_OCR_CONCURRENCY = getEnvInt("BATCH_OCR_CONCURRENCY", 1)
-	BATCH_OCR_MAX_ITEMS = getEnvInt("BATCH_OCR_MAX_ITEMS", 100)
+	BATCH_OCR_MAX_ITEMS = getEnvInt("BATCH_OCR_MAX_ITEMS", 500)
 	BATCH_OCR_ITEM_DELAY_MS = getEnvInt("BATCH_OCR_ITEM_DELAY_MS", 2000)
 	BATCH_OCR_MAX_ATTEMPTS = getEnvInt("BATCH_OCR_MAX_ATTEMPTS", 2)
 	BATCH_OCR_ITEM_TIMEOUT_SEC = getEnvInt("BATCH_OCR_ITEM_TIMEOUT_SEC", 300)
