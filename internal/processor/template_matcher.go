@@ -169,10 +169,16 @@ func AnalyzeTemplateMatch(
 		}
 	}
 
-	// Find the matched template from map
-	// Try exact match first
-	matchedTemplate, found := templateMap[aiResult.MatchedTemplate]
+	// Find the matched template from map. The AI answers in free text, so resolve tolerantly
+	// (exact → whitespace-insensitive → text before " | " → description prefix) before fuzzy matching.
+	matchedTemplate, matchedKey, resolvedHow, found := resolveTemplateByAIName(aiResult.MatchedTemplate, templateMap)
 	matchedDescription := aiResult.MatchedTemplate
+	if found {
+		matchedDescription = matchedKey
+		if resolvedHow != resolveExact {
+			reqCtx.LogInfo("✅ Template resolved by %s match: '%s'", resolvedHow, matchedKey)
+		}
+	}
 
 	// If not found, try fuzzy matching (handle typos/variations)
 	if !found {
