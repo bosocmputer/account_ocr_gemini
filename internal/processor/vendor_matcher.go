@@ -240,3 +240,31 @@ func maxInt(a, b int) int {
 	}
 	return b
 }
+
+// markdownImageLine matches a line that is only an embedded image, e.g. "![img-0.jpeg](img-0.jpeg)".
+// Mistral OCR emits one of these at the top of every page, so the "first non-empty line" used as the
+// vendor name was always this placeholder and vendor pre-matching never matched anything.
+var markdownImageLine = regexp.MustCompile(`^!\[[^\]]*\]\([^)]*\)$`)
+
+// markdownDecoration strips leading heading/emphasis markers so "## บริษัท ก จำกัด" and "**บริษัท ก**" read as plain names.
+var markdownDecoration = regexp.MustCompile(`^[#>*\-\s]+|[*\s]+$`)
+
+// minVendorNameBytes keeps the original rule (more than 5 bytes, i.e. at least two Thai characters) so one-letter
+// or page-number lines are not taken as a vendor name.
+const minVendorNameBytes = 5
+
+// ExtractVendorNameFromOCR picks the vendor name from the raw OCR text: the first line that is not an embedded
+// image and has some text. Returns "" when nothing usable is found.
+func ExtractVendorNameFromOCR(rawText string) string {
+	for _, line := range strings.Split(rawText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || markdownImageLine.MatchString(trimmed) {
+			continue
+		}
+		candidate := markdownDecoration.ReplaceAllString(trimmed, "")
+		if len(candidate) > minVendorNameBytes {
+			return candidate
+		}
+	}
+	return ""
+}

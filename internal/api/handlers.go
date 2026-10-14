@@ -1057,17 +1057,9 @@ func runAnalyzePipeline(job *jobs.Job, req ExtractRequest, debugMode bool, maste
 		vendorNameFromOCR := ""
 		taxIDFromOCR := ""
 
-		// Extract vendor info from raw text (simple heuristic)
-		// First non-empty line is usually the vendor name
-		rawText := ocrResult.RawDocumentText
-		lines := strings.Split(rawText, "\n")
-		for _, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if trimmed != "" && len(trimmed) > 5 {
-				vendorNameFromOCR = trimmed
-				break
-			}
-		}
+		// Extract vendor info from raw text (simple heuristic): the first line that is real text.
+		// Embedded-image placeholders (Mistral OCR starts every page with one) are skipped.
+		vendorNameFromOCR = processor.ExtractVendorNameFromOCR(ocrResult.RawDocumentText)
 
 		// Perform fuzzy matching
 		if vendorNameFromOCR != "" || taxIDFromOCR != "" {
