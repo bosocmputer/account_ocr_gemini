@@ -285,8 +285,8 @@ func GetDebtors(shopID string, additionalFilter bson.M) ([]bson.M, error) {
 	collection := mongoDB.Collection("debtors")
 	cursor, err := collection.Find(ctx, filter)
 	if err != nil {
-		// Empty debtors is OK - some shops may not have debtors yet
-		return []bson.M{}, nil
+		// A shop with no debtors is an empty result, not an error — so a failure here is a real failure and must not look like "no debtors"
+		return nil, fmt.Errorf("failed to query debtors: %w", err)
 	}
 	defer cursor.Close(ctx)
 

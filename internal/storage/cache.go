@@ -50,7 +50,33 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 		return cache, nil
 	}
 
-	// Load fresh data from MongoDB
+	newCache, err := loadMasterData(shopID)
+	if err != nil {
+		return nil, err
+	}
+
+	masterDataCacheMap[shopID] = newCache
+	return newCache, nil
+}
+
+// ForceReloadMasterData bypasses the TTL and re-reads the shop's master data from MongoDB, replacing the cached copy.
+// Used where the user has typically just created the very record being looked up (e.g. a debtor added moments before an
+// Excel import) and a stale cache would report it as "not found". On failure the existing cache is left untouched.
+func ForceReloadMasterData(shopID string) (*MasterDataCache, error) {
+	cacheMutex.Lock()
+	defer cacheMutex.Unlock()
+
+	newCache, err := loadMasterData(shopID)
+	if err != nil {
+		return nil, err
+	}
+	masterDataCacheMap[shopID] = newCache
+	return newCache, nil
+}
+
+// loadMasterData reads every master-data collection for a shop straight from MongoDB.
+// Any failure is returned as an error so a partial/empty result is never cached as if it were real.
+func loadMasterData(shopID string) (*MasterDataCache, error) {
 	accounts, err := GetChartOfAccounts(shopID, bson.M{})
 	if err != nil {
 		return nil, err
@@ -86,8 +112,7 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 		return nil, err
 	}
 
-	// Create new cache
-	newCache := &MasterDataCache{
+	return &MasterDataCache{
 		Accounts:          accounts,
 		JournalBooks:      journalBooks,
 		AccountGroups:     accountGroups,
@@ -97,10 +122,7 @@ func GetOrLoadMasterData(shopID string) (*MasterDataCache, error) {
 		DocumentTemplates: documentTemplates,
 		LoadedAt:          time.Now(),
 		ShopID:            shopID,
-	}
-
-	masterDataCacheMap[shopID] = newCache
-	return newCache, nil
+	}, nil
 }
 
 // InvalidateCache removes cache for a specific shop

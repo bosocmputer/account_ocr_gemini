@@ -135,7 +135,8 @@ func SubmitSmlSalesImportValidationHandler(c *gin.Context) {
 		return
 	}
 
-	masterCache, err := storage.GetOrLoadMasterData(shopID)
+	// skip the 5-minute cache — the user may have just added the account/debtor being imported against
+	masterCache, err := storage.ForceReloadMasterData(shopID)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "master_data_load_failed", "message": err.Error()})
 		return

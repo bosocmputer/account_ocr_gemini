@@ -235,7 +235,9 @@ func SubmitImportValidationHandler(c *gin.Context) {
 	// created — mirrors SubmitAnalyzeReceiptHandler's own pattern of
 	// surfacing master-data problems immediately rather than as an async
 	// job failure.
-	masterCache, err := storage.GetOrLoadMasterData(shopID)
+	// Always re-read master data (skip the 5-minute cache): users routinely add a debtor/account and import right away,
+	// and a stale cache reported the new code as "not found".
+	masterCache, err := storage.ForceReloadMasterData(shopID)
 	if err != nil {
 		c.JSON(400, gin.H{"error": "master_data_load_failed", "message": err.Error()})
 		return
