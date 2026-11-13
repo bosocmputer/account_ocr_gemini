@@ -14,6 +14,7 @@ type MasterDataCache struct {
 	Accounts          []bson.M
 	JournalBooks      []bson.M
 	AccountGroups     []bson.M // accountGroups collection — used by the Excel-import validation pipeline
+	Branches          []bson.M // organizationBranches collection — used by the Excel-import validation pipeline (docbranchcode)
 	Creditors         []bson.M
 	Debtors           []bson.M     // เพิ่มลูกหนี้
 	ShopProfile       *ShopProfile // เพิ่มข้อมูลบริษัท
@@ -92,6 +93,11 @@ func loadMasterData(shopID string) (*MasterDataCache, error) {
 		return nil, err
 	}
 
+	branches, err := GetBranches(shopID, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+
 	creditors, err := GetCreditors(shopID, bson.M{})
 	if err != nil {
 		return nil, err
@@ -116,6 +122,7 @@ func loadMasterData(shopID string) (*MasterDataCache, error) {
 		Accounts:          accounts,
 		JournalBooks:      journalBooks,
 		AccountGroups:     accountGroups,
+		Branches:          branches,
 		Creditors:         creditors,
 		Debtors:           debtors,
 		ShopProfile:       shopProfile,

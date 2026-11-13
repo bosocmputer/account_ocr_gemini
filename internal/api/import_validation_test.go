@@ -13,6 +13,7 @@ import (
 	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/joho/godotenv"
 	"github.com/xuri/excelize/v2"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 // TestBuildParsedDocuments_SampleImportPerLine is a real end-to-end
@@ -606,9 +607,17 @@ func TestValidateImportConfig_VatWhtClassification(t *testing.T) {
 	}
 
 	// whtCustType out of range.
-	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(0), WhtCustType: ref(5)})
+	cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(0), WhtCustType: ref(8)})
 	if msg := validateImportConfig(&cfg); msg == "" {
-		t.Error("expected an error for whtCustType=5 (must be 0-4)")
+		t.Error("expected an error for whtCustType=8 (must be 0-7)")
+	}
+
+	// 5/6/7 = ภ.ธ.40 / ภ.ง.ด.54 / ภ.ง.ด.55 are valid.
+	for _, ct := range []int{5, 6, 7} {
+		cfg = withWhtCol(ImportValidationConfig{WhtTaxType: ref(1), WhtCustType: ref(ct), WhtConditionType: ref(1)})
+		if msg := validateImportConfig(&cfg); msg != "" {
+			t.Errorf("expected whtCustType=%d to be accepted, got error: %s", ct, msg)
+		}
 	}
 
 	// whtConditionType provided but whtTaxType != 1 — only meaningful for
@@ -934,5 +943,123 @@ func TestBuildParsedDocuments_WhtClassificationOnlyWhenDataPresent(t *testing.T)
 	_, issues = buildParsedDocuments(withWht, cfg3, chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, job3, time.Now().Add(time.Hour))
 	if n := whtIssueCount(issues); n != 0 {
 		t.Errorf("expected no WHT classification issue once whtTaxType/whtCustType are supplied, got %d", n)
+	}
+}
+
+// Document-level branch (docbranchcode) and WHT "ยื่นเพิ่ม" (taxsubmit +
+// taxsubmitmonth). No live DB: master maps are built by hand.
+func TestBuildParsedDocuments_BranchAndTaxSubmit(t *testing.T) {
+	col := func(i int) *int { v := i; return &v }
+	// cols: 0=docno 1=docdate 2=bookcode 3=accountcode 4=debit 5=credit
+	//       6=taxdocno 7=taxdate 8=whtdesc 9=whtbase 10=whtrate 11=whtamount
+	//       12=taxsubmit 13=taxsubmitmonth 14=docbranchcode
+	cfg := ImportValidationConfig{
+		HeaderRowIndex: 0,
+		RowMode:        "per-line",
+		FieldMappings: map[string]*int{
+			"docno": col(0), "docdate": col(1), "bookcode": col(2),
+			"accountcode": col(3), "debitamount": col(4), "creditamount": col(5),
+			"taxdocno": col(6), "taxdate": col(7), "whtdesc": col(8),
+			"whtbase": col(9), "whtrate": col(10), "whtamount": col(11),
+			"taxsubmit": col(12), "taxsubmitmonth": col(13), "docbranchcode": col(14),
+		},
+		WhtTaxType:       ref(1),
+		WhtCustType:      ref(6), // ภ.ง.ด.54
+		WhtConditionType: ref(1),
+	}
+	books := map[string]bson.M{"BK": {"code": "BK"}}
+	accounts := map[string]bson.M{"1000": {"accountcode": "1000", "accountname": "Cash"}, "2000": {"accountcode": "2000", "accountname": "AP"}}
+	empty := map[string]bson.M{}
+
+	build := func(rows [][]string) ([]ImportDocument, []ImportIssue) {
+		job, _, err := jobs.Create(common.NewRequestContext("unit-test-shop"))
+		if err != nil {
+			t.Fatalf("job create failed: %v", err)
+		}
+		return buildParsedDocuments(rows, cfg, accounts, books, empty, empty, empty, job, time.Now().Add(time.Hour))
+	}
+	issueOn := func(issues []ImportIssue, field string) bool {
+		for _, is := range issues {
+			if is.Field == field && is.Severity == "error" {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Case 1: ยื่นเพิ่มเดือน 3 + สาขา 00001 — ส่งต่อไปยังเอกสารและรายการภาษี
+	rows := [][]string{
+		{"D1", "2026-08-01", "BK", "1000", "100", "", "WHT-1", "2026-08-01", "service", "1000", "3", "30", "1", "3", "00001"},
+		{"D1", "2026-08-01", "BK", "2000", "", "100", "", "", "", "", "", "", "", "", ""},
+	}
+	docs, issues := build(rows)
+	if len(docs) != 1 {
+		t.Fatalf("expected 1 document, got %d (issues: %+v)", len(docs), issues)
+	}
+	if docs[0].Branchcode != "00001" {
+		t.Errorf("expected document branchcode 00001, got %q", docs[0].Branchcode)
+	}
+	if len(docs[0].Taxes) != 1 {
+		t.Fatalf("expected 1 tax entry, got %d", len(docs[0].Taxes))
+	}
+	if tx := docs[0].Taxes[0]; !tx.TaxSubmit || tx.TaxSubmitMonth != 3 || tx.CustType != 6 {
+		t.Errorf("expected taxsubmit=true month=3 custtype=6, got %+v", tx)
+	}
+	if issueOn(issues, "taxsubmitmonth") {
+		t.Errorf("did not expect a taxsubmitmonth error, got %+v", issues)
+	}
+
+	// Case 2: ยื่นเพิ่มแต่ไม่ระบุเดือน → error
+	rows[0][13] = ""
+	_, issues = build(rows)
+	if !issueOn(issues, "taxsubmitmonth") {
+		t.Error("expected a taxsubmitmonth error when taxsubmit=1 and the month is blank")
+	}
+
+	// Case 3: เดือนนอกช่วง → error
+	rows[0][13] = "13"
+	_, issues = build(rows)
+	if !issueOn(issues, "taxsubmitmonth") {
+		t.Error("expected a taxsubmitmonth error for month 13")
+	}
+
+	// Case 4: ไม่ยื่นเพิ่ม → ไม่ต้องมีเดือน, month = 0, ไม่มี error
+	rows[0][12], rows[0][13] = "", ""
+	docs, issues = build(rows)
+	if issueOn(issues, "taxsubmitmonth") {
+		t.Errorf("did not expect a taxsubmitmonth error when taxsubmit is empty, got %+v", issues)
+	}
+	if tx := docs[0].Taxes[0]; tx.TaxSubmit || tx.TaxSubmitMonth != 0 {
+		t.Errorf("expected taxsubmit=false month=0, got %+v", tx)
+	}
+
+	// Case 6: มี master สาขา — รหัสที่พบ → คงไว้, ไม่พบ → warning + ไม่ระบุสาขา
+	cfg.branchMap = map[string]bson.M{"00001": {"code": "00001"}}
+	docs, issues = build(rows)
+	if docs[0].Branchcode != "00001" {
+		t.Errorf("expected known branch 00001 to be kept, got %q", docs[0].Branchcode)
+	}
+	rows[0][14] = "99999"
+	docs, issues = build(rows)
+	if docs[0].Branchcode != "" {
+		t.Errorf("expected unknown branch to be dropped, got %q", docs[0].Branchcode)
+	}
+	foundWarn := false
+	for _, is := range issues {
+		if is.Field == "docbranchcode" && is.Severity == "warning" {
+			foundWarn = true
+		}
+	}
+	if !foundWarn {
+		t.Error("expected a docbranchcode warning for an unknown branch")
+	}
+	cfg.branchMap = nil
+	rows[0][14] = "00001"
+
+	// Case 5: ไม่ map docbranchcode → branchcode ว่าง
+	delete(cfg.FieldMappings, "docbranchcode")
+	docs, _ = build(rows)
+	if docs[0].Branchcode != "" {
+		t.Errorf("expected empty branchcode when the column is not mapped, got %q", docs[0].Branchcode)
 	}
 }

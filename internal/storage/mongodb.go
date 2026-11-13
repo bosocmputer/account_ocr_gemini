@@ -208,6 +208,35 @@ func GetAccountGroups(shopID string, additionalFilter bson.M) ([]bson.M, error) 
 	return results, nil
 }
 
+// GetBranches retrieves branches (สาขา) from the organizationBranches
+// collection, filtered by shopid. Collection name/casing verified directly
+// against the dev database (smldevdb.organizationBranches); documents carry
+// shopid, code and names[]. Used by the Excel-import validation pipeline to
+// check the optional document-level "docbranchcode" column.
+func GetBranches(shopID string, additionalFilter bson.M) ([]bson.M, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{"shopid": shopID}
+	for k, v := range additionalFilter {
+		filter[k] = v
+	}
+
+	collection := mongoDB.Collection("organizationBranches")
+	cursor, err := collection.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query organizationBranches: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var results []bson.M
+	if err = cursor.All(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	return results, nil
+}
+
 // GetDocumentFormate retrieves accounting templates from the documentFormate
 // collection, filtered by shopid, excluding templates with no details (an
 // empty template has nothing for the AI to match against). Moved here from

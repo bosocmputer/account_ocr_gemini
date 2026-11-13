@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -77,6 +78,10 @@ type ImportValidationConfig struct {
 	AmountColumns      []ImportAmountColumnSource `json:"amountColumns"` // "per-document-columns" only
 	FieldMappings      map[string]*int            `json:"fieldMappings"`
 
+	// branchMap = master สาขาของร้าน (organizationBranches) ใช้ตรวจ docbranchcode — ไม่มาจาก JSON
+	// (ตั้งโดย handler หลังโหลด masterCache) nil = ไม่ตรวจกับ master (เช่นการเรียกจาก test ที่ไม่มี DB)
+	branchMap map[string]bson.M
+
 	// Wizard-level VAT/WHT classification — one value for the whole import
 	// batch, not per-row column mapping (restores fields dropped when this
 	// importer moved off the old fixed-Excel-header VATTYPE/VATMODE/
@@ -88,9 +93,14 @@ type ImportValidationConfig struct {
 	VatType          *int `json:"vatType"`          // range depends on VatMode — see validateImportConfig
 	VatOrganization  *int `json:"vatOrganization"`  // 0=สำนักงานใหญ่, 1=สาขา
 	WhtTaxType       *int `json:"whtTaxType"`       // 0=ถูกหัก ณ ที่จ่าย, 1=หัก ณ ที่จ่าย
-	WhtCustType      *int `json:"whtCustType"`      // 0-4, customer/WHT-form type
+	WhtCustType      *int `json:"whtCustType"`      // 0-7, customer/WHT-form type (0=ภ.ง.ด.3 1=ภ.ง.ด.53 2=ภ.ง.ด.1 3=ภ.ง.ด.2 4=ภ.พ.36 5=ภ.ธ.40 6=ภ.ง.ด.54 7=ภ.ง.ด.55)
 	WhtConditionType *int `json:"whtConditionType"` // 1-3, only meaningful when WhtTaxType == 1
 }
+
+// maxWhtCustType is the highest taxes[].custtype value the system accepts:
+// 0=ภ.ง.ด.3, 1=ภ.ง.ด.53, 2=ภ.ง.ด.1, 3=ภ.ง.ด.2, 4=ภ.พ.36, 5=ภ.ธ.40,
+// 6=ภ.ง.ด.54, 7=ภ.ง.ด.55.
+const maxWhtCustType = 7
 
 // ImportIssue mirrors the JS `issues` array entries exactly.
 type ImportIssue struct {
@@ -148,6 +158,8 @@ type ImportTax struct {
 	TaxType          int               `json:"taxtype"`
 	ConditionTaxType int               `json:"conditiontaxtype"`
 	Address          string            `json:"address"`
+	TaxSubmit        bool              `json:"taxsubmit"`      // ยื่นเพิ่ม
+	TaxSubmitMonth   int               `json:"taxsubmitmonth"` // 1-12 เมื่อ TaxSubmit = true ไม่เช่นนั้น 0
 	TaxAmount        float64           `json:"taxamount"`
 	Details          []ImportWhtDetail `json:"details"`
 }
@@ -160,6 +172,7 @@ type ImportDocument struct {
 	Docdate            string                 `json:"docdate"`
 	Bookcode           string                 `json:"bookcode"`
 	Accountgroup       string                 `json:"accountgroup"`
+	Branchcode         string                 `json:"branchcode"` // รหัสสาขาของเอกสาร (header) — ไม่ใช่ vats[].branchcode ของคู่ค้า
 	Accountdescription string                 `json:"accountdescription"`
 	Accountperiod      int                    `json:"accountperiod"`
 	Accountyear        int                    `json:"accountyear"`
@@ -437,8 +450,8 @@ func validateWhtClassification(cfg *ImportValidationConfig) string {
 	if *cfg.WhtTaxType != 0 && *cfg.WhtTaxType != 1 {
 		return fmt.Sprintf("whtTaxType must be 0 or 1, got %d", *cfg.WhtTaxType)
 	}
-	if cfg.WhtCustType != nil && (*cfg.WhtCustType < 0 || *cfg.WhtCustType > 4) {
-		return fmt.Sprintf("whtCustType must be 0-4, got %d", *cfg.WhtCustType)
+	if cfg.WhtCustType != nil && (*cfg.WhtCustType < 0 || *cfg.WhtCustType > maxWhtCustType) {
+		return fmt.Sprintf("whtCustType must be 0-%d, got %d", maxWhtCustType, *cfg.WhtCustType)
 	}
 	if cfg.WhtConditionType != nil {
 		if *cfg.WhtTaxType != 1 {
@@ -530,6 +543,7 @@ func runImportValidationPipeline(job *jobs.Job, shopID, tempFilePath string, cfg
 	accountGroupMap := buildStringKeyedMap(masterCache.AccountGroups, "code")
 	debtorMap := buildStringKeyedMap(masterCache.Debtors, "code")
 	creditorMap := buildStringKeyedMap(masterCache.Creditors, "code")
+	cfg.branchMap = buildStringKeyedMap(masterCache.Branches, "code")
 
 	var issues []ImportIssue
 	docs, issues := buildParsedDocuments(dataRows, cfg, chartOfAccountsMap, journalBookMap, accountGroupMap, debtorMap, creditorMap, job, deadline)
@@ -1049,6 +1063,17 @@ func buildParsedDocuments(
 			}
 		}
 
+		// สาขาของเอกสาร (header-level) — คอลัมน์ "docbranchcode" ต้องไม่ชนกับ "branchcode"
+		// ซึ่งเป็นสาขาของคู่ค้าในบล็อก VAT ด้านล่าง ไม่บังคับ; ถ้าไม่พบใน master → warning
+		// และไม่ระบุสาขา (เหมือน accountgroup)
+		docBranchcode := strings.TrimSpace(cellText(row, fm["docbranchcode"]))
+		if docBranchcode != "" && cfg.branchMap != nil {
+			if _, ok := cfg.branchMap[docBranchcode]; !ok {
+				issues = append(issues, ImportIssue{Severity: "warning", RowNumbers: g.RowNums, Docno: docno, Field: "docbranchcode", Message: fmt.Sprintf(`ไม่พบรหัสสาขา "%s" ในระบบ (จะไม่ถูกระบุสาขา)`, docBranchcode)})
+				docBranchcode = ""
+			}
+		}
+
 		// Debtor/creditor — auto-detected by checking which masterdata list
 		// (debtors or creditors) the mapped code actually belongs to,
 		// rather than requiring the user to pre-declare a file-wide type.
@@ -1325,6 +1350,18 @@ func buildParsedDocuments(
 			whtbaseField := collectRowLevelField(g.SourceRows, "whtbase", true)
 			whtrateField := collectRowLevelField(g.SourceRows, "whtrate", true)
 			whtamountField := collectRowLevelField(g.SourceRows, "whtamount", true)
+			// ยื่นเพิ่ม — เหมือน vatsubmit ("1"/"true" = ยื่นเพิ่ม); ถ้ายื่นเพิ่มต้องมีเดือน 1-12
+			taxsubmitField := collectRowLevelField(g.SourceRows, "taxsubmit", false)
+			taxsubmit := taxsubmitField.Value == "1" || strings.EqualFold(taxsubmitField.Value, "true")
+			taxsubmitmonthField := collectRowLevelField(g.SourceRows, "taxsubmitmonth", true)
+			taxsubmitmonth := 0
+			if taxsubmit {
+				if taxsubmitmonthField.NumberValue == nil || *taxsubmitmonthField.NumberValue != math.Trunc(*taxsubmitmonthField.NumberValue) || *taxsubmitmonthField.NumberValue < 1 || *taxsubmitmonthField.NumberValue > 12 {
+					issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "taxsubmitmonth", Message: "รายการหัก ณ ที่จ่ายที่ยื่นเพิ่มต้องระบุเดือนที่ยื่นเพิ่มเป็นเลข 1-12"})
+				} else {
+					taxsubmitmonth = int(*taxsubmitmonthField.NumberValue)
+				}
+			}
 
 			if taxdateField.HasConflict {
 				issues = append(issues, ImportIssue{Severity: "warning", RowNumbers: taxdateField.RowNums, Docno: docno, Field: "taxdate", Message: fmt.Sprintf("วันที่หัก ณ ที่จ่ายไม่ตรงกันหลายแถว จะใช้ค่าจากแถวที่ %d", taxdateField.RowNums[0])})
@@ -1358,6 +1395,7 @@ func buildParsedDocuments(
 				CustType:  intOrZero(cfg.WhtCustType),
 				CustTaxID: collectRowLevelField(g.SourceRows, "custtaxid", false).Value,
 				TaxType:   intOrZero(cfg.WhtTaxType), ConditionTaxType: intOrZero(cfg.WhtConditionType), Address: collectRowLevelField(g.SourceRows, "address", false).Value,
+				TaxSubmit: taxsubmit, TaxSubmitMonth: taxsubmitmonth,
 				TaxAmount: whtamount,
 				Details: []ImportWhtDetail{{
 					Description: whtdescField.Value, TaxBase: numOrZeroField(whtbaseField), TaxRate: numOrZeroField(whtrateField), TaxAmount: whtamount,
@@ -1371,7 +1409,7 @@ func buildParsedDocuments(
 		}
 
 		docs = append(docs, ImportDocument{
-			Docno: docno, Docdate: g.Docdate, Bookcode: bookcode, Accountgroup: finalAccountGroup,
+			Docno: docno, Docdate: g.Docdate, Bookcode: bookcode, Accountgroup: finalAccountGroup, Branchcode: docBranchcode,
 			Accountdescription: accountdescription, Accountperiod: accountperiod, Accountyear: accountyear,
 			Journaltype: journaltype, Amount: sumDebit, BatchID: "",
 			Exdocrefno: exdocrefno, Exdocrefdate: exdocrefdate,
