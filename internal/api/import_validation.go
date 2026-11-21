@@ -159,7 +159,8 @@ type ImportTax struct {
 	ConditionTaxType int               `json:"conditiontaxtype"`
 	Address          string            `json:"address"`
 	TaxSubmit        bool              `json:"taxsubmit"`      // ยื่นเพิ่ม
-	TaxSubmitMonth   int               `json:"taxsubmitmonth"` // 1-12 เมื่อ TaxSubmit = true ไม่เช่นนั้น 0
+	TaxSubmitMonth   int               `json:"taxsubmitmonth"` // เดือนภาษี 1-12 (คำนวณจากวันที่หัก ณ ที่จ่าย; เมื่อยื่นเพิ่มกำหนดเองได้)
+	TaxSubmitYear    int               `json:"taxsubmityear"`  // ปีภาษี พ.ศ.
 	TaxAmount        float64           `json:"taxamount"`
 	Details          []ImportWhtDetail `json:"details"`
 }
@@ -1350,16 +1351,44 @@ func buildParsedDocuments(
 			whtbaseField := collectRowLevelField(g.SourceRows, "whtbase", true)
 			whtrateField := collectRowLevelField(g.SourceRows, "whtrate", true)
 			whtamountField := collectRowLevelField(g.SourceRows, "whtamount", true)
-			// ยื่นเพิ่ม — เหมือน vatsubmit ("1"/"true" = ยื่นเพิ่ม); ถ้ายื่นเพิ่มต้องมีเดือน 1-12
+			// ยื่นเพิ่ม (taxsubmit) + ปีภาษี/เดือนภาษี (taxsubmityear/taxsubmitmonth) — หลักการเดียวกับ vatsubmit/vatyear/vatperiod:
+			// ปกติคำนวณจากวันที่หัก ณ ที่จ่าย (เดือน 1-12, ปี พ.ศ.); เมื่อยื่นเพิ่ม ใช้ค่าจากคอลัมน์ taxsubmityear/taxsubmitmonth
+			// ที่ map ไว้แทนได้ (ว่าง = ใช้ค่าที่คำนวณ; ค่าที่ไม่ถูกต้อง = error)
 			taxsubmitField := collectRowLevelField(g.SourceRows, "taxsubmit", false)
 			taxsubmit := taxsubmitField.Value == "1" || strings.EqualFold(taxsubmitField.Value, "true")
-			taxsubmitmonthField := collectRowLevelField(g.SourceRows, "taxsubmitmonth", true)
-			taxsubmitmonth := 0
+			taxsubmitmonth, taxsubmityear := 0, 0
+			if taxdateField.Value != "" {
+				if t, err := time.Parse("2006-01-02T15:04:05.000Z", taxdateField.Value); err == nil {
+					taxsubmitmonth = int(t.Month())
+					taxsubmityear = t.Year() + 543
+				}
+			}
 			if taxsubmit {
-				if taxsubmitmonthField.NumberValue == nil || *taxsubmitmonthField.NumberValue != math.Trunc(*taxsubmitmonthField.NumberValue) || *taxsubmitmonthField.NumberValue < 1 || *taxsubmitmonthField.NumberValue > 12 {
-					issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "taxsubmitmonth", Message: "รายการหัก ณ ที่จ่ายที่ยื่นเพิ่มต้องระบุเดือนที่ยื่นเพิ่มเป็นเลข 1-12"})
-				} else {
-					taxsubmitmonth = int(*taxsubmitmonthField.NumberValue)
+				// ช่องตัวเลข collectRowLevelField เก็บเฉพาะ NumberValue (ข้อความที่ไม่ใช่ตัวเลขถือว่า "ไม่มีค่า")
+				// จึงเช็คข้อความดิบเพิ่ม เพื่อไม่ให้ค่าที่พิมพ์ผิดถูกข้ามไปเงียบๆ
+				hasRawText := func(fieldKey string) bool {
+					for _, sr := range g.SourceRows {
+						if cellText(sr.Row, fm[fieldKey]) != "" {
+							return true
+						}
+					}
+					return false
+				}
+				taxsubmitmonthField := collectRowLevelField(g.SourceRows, "taxsubmitmonth", true)
+				if taxsubmitmonthField.HasValue || hasRawText("taxsubmitmonth") {
+					if v := taxsubmitmonthField.NumberValue; v == nil || *v != math.Trunc(*v) || *v < 1 || *v > 12 {
+						issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "taxsubmitmonth", Message: "เดือนภาษีของรายการที่ยื่นเพิ่มต้องเป็นเลข 1-12"})
+					} else {
+						taxsubmitmonth = int(*v)
+					}
+				}
+				taxsubmityearField := collectRowLevelField(g.SourceRows, "taxsubmityear", true)
+				if taxsubmityearField.HasValue || hasRawText("taxsubmityear") {
+					if v := taxsubmityearField.NumberValue; v == nil || *v != math.Trunc(*v) || *v < 2500 || *v > 2700 {
+						issues = append(issues, ImportIssue{Severity: "error", RowNumbers: g.RowNums, Docno: docno, Field: "taxsubmityear", Message: "ปีภาษี (พ.ศ.) ของรายการที่ยื่นเพิ่มต้องเป็นเลข 4 หลัก (เช่น 2569)"})
+					} else {
+						taxsubmityear = int(*v)
+					}
 				}
 			}
 
@@ -1395,7 +1424,7 @@ func buildParsedDocuments(
 				CustType:  intOrZero(cfg.WhtCustType),
 				CustTaxID: collectRowLevelField(g.SourceRows, "custtaxid", false).Value,
 				TaxType:   intOrZero(cfg.WhtTaxType), ConditionTaxType: intOrZero(cfg.WhtConditionType), Address: collectRowLevelField(g.SourceRows, "address", false).Value,
-				TaxSubmit: taxsubmit, TaxSubmitMonth: taxsubmitmonth,
+				TaxSubmit: taxsubmit, TaxSubmitMonth: taxsubmitmonth, TaxSubmitYear: taxsubmityear,
 				TaxAmount: whtamount,
 				Details: []ImportWhtDetail{{
 					Description: whtdescField.Value, TaxBase: numOrZeroField(whtbaseField), TaxRate: numOrZeroField(whtrateField), TaxAmount: whtamount,

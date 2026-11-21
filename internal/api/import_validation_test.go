@@ -952,7 +952,7 @@ func TestBuildParsedDocuments_BranchAndTaxSubmit(t *testing.T) {
 	col := func(i int) *int { v := i; return &v }
 	// cols: 0=docno 1=docdate 2=bookcode 3=accountcode 4=debit 5=credit
 	//       6=taxdocno 7=taxdate 8=whtdesc 9=whtbase 10=whtrate 11=whtamount
-	//       12=taxsubmit 13=taxsubmitmonth 14=docbranchcode
+	//       12=taxsubmit 13=taxsubmitmonth 14=docbranchcode 15=taxsubmityear
 	cfg := ImportValidationConfig{
 		HeaderRowIndex: 0,
 		RowMode:        "per-line",
@@ -961,7 +961,7 @@ func TestBuildParsedDocuments_BranchAndTaxSubmit(t *testing.T) {
 			"accountcode": col(3), "debitamount": col(4), "creditamount": col(5),
 			"taxdocno": col(6), "taxdate": col(7), "whtdesc": col(8),
 			"whtbase": col(9), "whtrate": col(10), "whtamount": col(11),
-			"taxsubmit": col(12), "taxsubmitmonth": col(13), "docbranchcode": col(14),
+			"taxsubmit": col(12), "taxsubmitmonth": col(13), "docbranchcode": col(14), "taxsubmityear": col(15),
 		},
 		WhtTaxType:       ref(1),
 		WhtCustType:      ref(6), // ภ.ง.ด.54
@@ -989,8 +989,8 @@ func TestBuildParsedDocuments_BranchAndTaxSubmit(t *testing.T) {
 
 	// Case 1: ยื่นเพิ่มเดือน 3 + สาขา 00001 — ส่งต่อไปยังเอกสารและรายการภาษี
 	rows := [][]string{
-		{"D1", "2026-08-01", "BK", "1000", "100", "", "WHT-1", "2026-08-01", "service", "1000", "3", "30", "1", "3", "00001"},
-		{"D1", "2026-08-01", "BK", "2000", "", "100", "", "", "", "", "", "", "", "", ""},
+		{"D1", "2026-08-01", "BK", "1000", "100", "", "WHT-1", "2026-08-01", "service", "1000", "3", "30", "1", "3", "00001", "2568"},
+		{"D1", "2026-08-01", "BK", "2000", "", "100", "", "", "", "", "", "", "", "", "", ""},
 	}
 	docs, issues := build(rows)
 	if len(docs) != 1 {
@@ -1002,35 +1002,44 @@ func TestBuildParsedDocuments_BranchAndTaxSubmit(t *testing.T) {
 	if len(docs[0].Taxes) != 1 {
 		t.Fatalf("expected 1 tax entry, got %d", len(docs[0].Taxes))
 	}
-	if tx := docs[0].Taxes[0]; !tx.TaxSubmit || tx.TaxSubmitMonth != 3 || tx.CustType != 6 {
-		t.Errorf("expected taxsubmit=true month=3 custtype=6, got %+v", tx)
+	// ยื่นเพิ่ม: ใช้ปี/เดือนจากคอลัมน์ (เดือน 3, ปี 2568) แทนค่าที่คำนวณจากวันที่หัก (2026-08 → เดือน 8, ปี 2569)
+	if tx := docs[0].Taxes[0]; !tx.TaxSubmit || tx.TaxSubmitMonth != 3 || tx.TaxSubmitYear != 2568 || tx.CustType != 6 {
+		t.Errorf("expected taxsubmit=true period=3 year=2568 custtype=6, got %+v", tx)
 	}
-	if issueOn(issues, "taxsubmitmonth") {
-		t.Errorf("did not expect a taxsubmitmonth error, got %+v", issues)
-	}
-
-	// Case 2: ยื่นเพิ่มแต่ไม่ระบุเดือน → error
-	rows[0][13] = ""
-	_, issues = build(rows)
-	if !issueOn(issues, "taxsubmitmonth") {
-		t.Error("expected a taxsubmitmonth error when taxsubmit=1 and the month is blank")
+	if issueOn(issues, "taxsubmitmonth") || issueOn(issues, "taxsubmityear") {
+		t.Errorf("did not expect a period/year error, got %+v", issues)
 	}
 
-	// Case 3: เดือนนอกช่วง → error
-	rows[0][13] = "13"
+	// Case 2: ยื่นเพิ่มแต่ช่องปี/เดือนว่าง → ใช้ค่าที่คำนวณจากวันที่หัก ณ ที่จ่าย ไม่ error
+	rows[0][13], rows[0][15] = "", ""
+	docs, issues = build(rows)
+	if issueOn(issues, "taxsubmitmonth") || issueOn(issues, "taxsubmityear") {
+		t.Errorf("did not expect an error when period/year are blank, got %+v", issues)
+	}
+	if tx := docs[0].Taxes[0]; tx.TaxSubmitMonth != 8 || tx.TaxSubmitYear != 2569 {
+		t.Errorf("expected derived period=8 year=2569, got %+v", tx)
+	}
+
+	// Case 3: ยื่นเพิ่ม + เดือนนอกช่วง / ปีผิดรูปแบบ → error
+	rows[0][13], rows[0][15] = "13", "2568"
 	_, issues = build(rows)
 	if !issueOn(issues, "taxsubmitmonth") {
 		t.Error("expected a taxsubmitmonth error for month 13")
 	}
-
-	// Case 4: ไม่ยื่นเพิ่ม → ไม่ต้องมีเดือน, month = 0, ไม่มี error
-	rows[0][12], rows[0][13] = "", ""
-	docs, issues = build(rows)
-	if issueOn(issues, "taxsubmitmonth") {
-		t.Errorf("did not expect a taxsubmitmonth error when taxsubmit is empty, got %+v", issues)
+	rows[0][13], rows[0][15] = "3", "69"
+	_, issues = build(rows)
+	if !issueOn(issues, "taxsubmityear") {
+		t.Error("expected a taxsubmityear error for a 2-digit year")
 	}
-	if tx := docs[0].Taxes[0]; tx.TaxSubmit || tx.TaxSubmitMonth != 0 {
-		t.Errorf("expected taxsubmit=false month=0, got %+v", tx)
+
+	// Case 4: ไม่ยื่นเพิ่ม → ไม่อ่านปี/เดือนจากคอลัมน์ ใช้ค่าที่คำนวณจากวันที่เสมอ
+	rows[0][12], rows[0][13], rows[0][15] = "", "3", "2568"
+	docs, issues = build(rows)
+	if issueOn(issues, "taxsubmitmonth") || issueOn(issues, "taxsubmityear") {
+		t.Errorf("did not expect a period/year error when taxsubmit is empty, got %+v", issues)
+	}
+	if tx := docs[0].Taxes[0]; tx.TaxSubmit || tx.TaxSubmitMonth != 8 || tx.TaxSubmitYear != 2569 {
+		t.Errorf("expected taxsubmit=false with derived period=8 year=2569, got %+v", tx)
 	}
 
 	// Case 6: มี master สาขา — รหัสที่พบ → คงไว้, ไม่พบ → warning + ไม่ระบุสาขา
