@@ -52,6 +52,11 @@ var (
 	MONGO_URI     string
 	MONGO_DB_NAME string
 
+	// MAIN_API_URL is the main accounting API (e.g. https://api.dev.dedepos.com/)
+	// that shop-brain endpoints ask, with the caller's own token, whether the
+	// caller owns the shop. Empty = shop-brain endpoints answer 503.
+	MAIN_API_URL string
+
 	// Image preprocessing settings
 	ENABLE_IMAGE_PREPROCESSING bool
 	MAX_IMAGE_DIMENSION        int
@@ -178,6 +183,7 @@ func LoadConfig() {
 	// MongoDB Configuration
 	MONGO_URI = getEnv("MONGO_URI", "mongodb://localhost:27017")
 	MONGO_DB_NAME = getEnv("MONGO_DB_NAME", "your_database_name")
+	MAIN_API_URL = getEnv("MAIN_API_URL", "")
 
 	// Image Processing
 	ENABLE_IMAGE_PREPROCESSING = getEnvBool("ENABLE_IMAGE_PREPROCESSING", true)

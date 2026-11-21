@@ -14,6 +14,7 @@ import (
 	"github.com/bosocmputer/account_ocr_gemini/configs"
 	"github.com/bosocmputer/account_ocr_gemini/internal/api"
 	"github.com/bosocmputer/account_ocr_gemini/internal/batchocr"
+	"github.com/bosocmputer/account_ocr_gemini/internal/shopbrain"
 	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/gin-gonic/gin"
 )
@@ -128,6 +129,15 @@ func main() {
 	billscan.GET("/api/v1/batch-ocr/:batchId", batchocr.GetBatchOcrStatusHandler)
 	billscan.POST("/api/v1/batch-ocr/:batchId/cancel", batchocr.CancelBatchOcrHandler)
 	billscan.POST("/api/v1/batch-ocr/:batchId/retry", batchocr.RetryBatchOcrFailedHandler)
+
+	// Shop brain (read-only): master data + booking patterns learned from the
+	// shop's own journals, for the bcaccount "สมองร้าน" page. Unlike the routes
+	// above these check the caller: the browser's Bearer token is sent to the
+	// main API's /list-shop and only the shop's owner (role 2) gets through.
+	// See internal/shopbrain.
+	brainHandlers := &shopbrain.Handlers{Svc: shopbrain.NewService(shopbrain.NewOwnerVerifier(configs.MAIN_API_URL))}
+	billscan.GET("/api/v1/shop-brain", brainHandlers.GetShopBrain)
+	billscan.GET("/api/v1/shop-brain/export", brainHandlers.ExportShopBrain)
 
 	// Step 4: Setup HTTP server with timeouts.
 	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute
