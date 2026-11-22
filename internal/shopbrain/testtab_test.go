@@ -263,7 +263,11 @@ func TestTestTabRoutes(t *testing.T) {
 		t.Errorf("ask = %d %s", w.Code, w.Body.String())
 	}
 	if w = send(r, "POST", "/ask?shopid=OWNED", "good-token", AskInput{}); w.Code != http.StatusBadRequest {
-		t.Errorf("ask without docformat = %d", w.Code)
+		t.Errorf("ask with nothing to look up = %d", w.Code)
+	}
+	// shops that never set a document format can still ask by party
+	if w = send(r, "POST", "/ask?shopid=OWNED", "good-token", AskInput{PartyCode: "C1"}); w.Code != http.StatusOK {
+		t.Errorf("ask by party only = %d %s", w.Code, w.Body.String())
 	}
 	if w = send(r, "POST", "/feedback?shopid=OWNED", "good-token", map[string]any{"mode": "ask", "verdict": VerdictWrong, "input": AskInput{PartyCode: "C1", DocFormat: "PV"}, "correct_accounts": "52100D"}); w.Code != http.StatusOK {
 		t.Errorf("ask feedback = %d %s", w.Code, w.Body.String())

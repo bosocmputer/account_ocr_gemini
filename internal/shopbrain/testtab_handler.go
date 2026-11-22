@@ -86,8 +86,8 @@ func (h *Handlers) AskBrain(c *gin.Context) {
 		return
 	}
 	var in AskInput
-	if err := c.ShouldBindJSON(&in); err != nil || strings.TrimSpace(in.DocFormat) == "" || in.Amount < 0 || utf8.RuneCountInString(in.Description) > 300 {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "invalid_input", "message": "ต้องระบุประเภทเอกสาร และยอดเงินต้องไม่ติดลบ"})
+	if err := c.ShouldBindJSON(&in); err != nil || in.Empty() || in.Amount < 0 || utf8.RuneCountInString(in.Description) > 300 {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "invalid_input", "message": "ต้องระบุคู่ค้า เลขผู้เสียภาษี ประเภทเอกสาร หรือคำอธิบาย อย่างน้อยหนึ่งอย่าง และยอดเงินต้องไม่ติดลบ"})
 		return
 	}
 	b, ok := h.brain(c, shopID)
@@ -143,7 +143,7 @@ func (h *Handlers) PostFeedback(c *gin.Context) {
 		f.Actual = e.shape.fullKey()
 		f.AutoMatchAccounts = g.Known() && g.Accounts == e.shape.Accounts
 	case "ask":
-		if r.Input == nil || strings.TrimSpace(r.Input.DocFormat) == "" {
+		if r.Input == nil || r.Input.Empty() {
 			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "invalid_input"})
 			return
 		}
