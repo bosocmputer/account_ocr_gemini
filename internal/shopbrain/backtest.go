@@ -4,6 +4,14 @@ package shopbrain
 // booking from the journals saved before it, then learns it. Counts are
 // unweighted so the result is reproducible and comparable across runs.
 func runBacktest(entries []entry, opts Options) Backtest {
+	bt, _, _ := replay(entries, opts)
+	return bt
+}
+
+// replay is runBacktest that also returns each entry's guess (aligned with
+// entries) and the shapes seen, for the quiz.
+func replay(entries []entry, opts Options) (Backtest, []Guess, map[string]Shape) {
+	guesses := make([]Guess, len(entries))
 	bt := Backtest{ByLevel: map[Level]*HitStat{}, BySource: map[Source]*HitStat{}, Skipped: map[Level]int{}, MinConsistency: opts.MinConsistency, MinConsistencyFormat: opts.MinConsistencyFormat}
 	for _, l := range allLevels {
 		bt.ByLevel[l] = &HitStat{}
@@ -12,24 +20,11 @@ func runBacktest(entries []entry, opts Options) Backtest {
 		bt.BySource[s] = &HitStat{}
 	}
 
-	type tally struct {
-		accounts map[string]int
-		full     map[string]int
-		n        int
-	}
-	seen := map[string]*tally{}
-	top := func(m map[string]int) string {
-		best, n := "", -1
-		for k, c := range m {
-			if c > n || (c == n && k < best) {
-				best, n = k, c
-			}
-		}
-		return best
-	}
+	top := topKey
+	pr := newPredictor(opts)
 	baseline := map[string]*tally{}
 
-	for _, e := range entries {
+	for i, e := range entries {
 		full := e.shape.fullKey()
 		bt.Overall.Total++
 		bs := bt.BySource[e.src]
@@ -37,43 +32,25 @@ func runBacktest(entries []entry, opts Options) Backtest {
 
 		// Ladder prediction: first level whose key has enough earlier support
 		// and a consistent enough leading shape; otherwise no guess.
-		var used Level = levelNoMatch
-		var guessAcc, guessFull string
-		for _, k := range e.keys {
-			t := seen[k.key]
-			if t == nil || t.n < minSupport(k.level) {
-				continue
-			}
-			if share := float64(t.full[top(t.full)]) / float64(t.n); share < opts.minConsistency(k.level) {
-				bt.Skipped[k.level]++
-				continue
-			}
-			used, guessAcc, guessFull = k.level, top(t.accounts), top(t.full)
-			break
+		g := pr.predict(e.keys)
+		guesses[i] = g
+		for _, s := range g.Skipped {
+			bt.Skipped[s.Level]++
 		}
-		if used != levelNoMatch {
-			bl := bt.ByLevel[used]
+		if g.Known() {
+			bl := bt.ByLevel[g.Level]
 			for _, h := range []*HitStat{&bt.Overall, bs, bl} {
 				h.Predicted++
-				if guessAcc == e.shape.Accounts {
+				if g.Accounts == e.shape.Accounts {
 					h.HitAccounts++
 				}
-				if guessFull == full {
+				if g.Full == full {
 					h.HitFull++
 				}
 			}
 			bl.Total++
 		}
-		for _, k := range e.keys {
-			t := seen[k.key]
-			if t == nil {
-				t = &tally{accounts: map[string]int{}, full: map[string]int{}}
-				seen[k.key] = t
-			}
-			t.accounts[e.shape.Accounts]++
-			t.full[full]++
-			t.n++
-		}
+		pr.learn(e)
 
 		// Baseline = the earlier mongosh simulation: party code + docformat, any prior occurrence.
 		if e.src != SourceStatement && e.party.Code != "" {
@@ -115,5 +92,5 @@ func runBacktest(entries []entry, opts Options) Backtest {
 	for _, h := range bt.BySource {
 		finalize(h)
 	}
-	return bt
+	return bt, guesses, pr.shapes
 }

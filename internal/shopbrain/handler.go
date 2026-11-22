@@ -16,7 +16,8 @@ import (
 // Handlers exposes the brain to bcaccount. Every route checks, through the
 // main API and the caller's own token, that the caller owns the shop.
 type Handlers struct {
-	Svc *Service
+	Svc   *Service
+	Store FeedbackStore // nil → feedback routes answer 503
 }
 
 func bearer(c *gin.Context) string {

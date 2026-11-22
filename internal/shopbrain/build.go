@@ -106,9 +106,16 @@ func Build(master MasterData, journals []Journal, groups map[string]ImageGroup, 
 
 	b := &Brain{
 		Version: BrainVersion, GeneratedAt: opts.AsOf, Options: opts, Master: master, Patterns: list,
-		Usage: buildUsage(master, entries), Backtest: runBacktest(entries, opts),
+		Usage: buildUsage(master, entries),
 		Index: map[string]string{},
 	}
+	b.Backtest, b.guesses, b.shapes = replay(entries, opts)
+	b.entries = entries
+	b.byKey = make(map[string]*Pattern, len(list))
+	for _, p := range list {
+		b.byKey[p.Key] = p
+	}
+	b.chart = chart
 	for _, j := range journals {
 		b.Index[j.GuidFixed] = journalHash(j)
 		if j.UpdatedAt.After(b.Watermark.MaxUpdatedAt) {
@@ -250,8 +257,10 @@ func (p *Pattern) finish(chart map[string]Account, opts Options) {
 	for _, v := range p.variants {
 		for _, l := range v.Lines {
 			if l.ratioN > 0 {
-				l.RatioAvg = round4(l.ratioSum / float64(l.ratioN))
-				l.RatioMin, l.RatioMax = round4(l.RatioMin), round4(l.RatioMax)
+				// 6 decimals: amounts are rebuilt as ratio × total, and 4 decimals
+				// turn 7/107 (VAT 7%) into 69.98 on a 1,070.00 bill.
+				l.RatioAvg = round6(l.ratioSum / float64(l.ratioN))
+				l.RatioMin, l.RatioMax = round6(l.RatioMin), round6(l.RatioMax)
 			} else {
 				l.RatioMin, l.RatioMax = 0, 0
 			}
@@ -290,6 +299,13 @@ func (p *Pattern) finish(chart map[string]Account, opts Options) {
 			}
 		}
 	}
+}
+
+func round6(f float64) float64 {
+	if math.IsInf(f, 0) || math.IsNaN(f) {
+		return 0
+	}
+	return math.Round(f*1e6) / 1e6
 }
 
 func round4(f float64) float64 {

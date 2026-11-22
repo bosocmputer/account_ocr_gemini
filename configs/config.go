@@ -56,6 +56,10 @@ var (
 	// that shop-brain endpoints ask, with the caller's own token, whether the
 	// caller owns the shop. Empty = shop-brain endpoints answer 503.
 	MAIN_API_URL string
+	// BRAIN_MONGO_URI / BRAIN_MONGO_DB: separate MongoDB for the owner's shop-brain test verdicts
+	// (the main database is read-only). Empty → the test tab works but cannot save verdicts.
+	BRAIN_MONGO_URI string
+	BRAIN_MONGO_DB  string
 
 	// Image preprocessing settings
 	ENABLE_IMAGE_PREPROCESSING bool
@@ -184,6 +188,8 @@ func LoadConfig() {
 	MONGO_URI = getEnv("MONGO_URI", "mongodb://localhost:27017")
 	MONGO_DB_NAME = getEnv("MONGO_DB_NAME", "your_database_name")
 	MAIN_API_URL = getEnv("MAIN_API_URL", "")
+	BRAIN_MONGO_URI = getEnv("BRAIN_MONGO_URI", "")
+	BRAIN_MONGO_DB = getEnv("BRAIN_MONGO_DB", "shopbrain")
 
 	// Image Processing
 	ENABLE_IMAGE_PREPROCESSING = getEnvBool("ENABLE_IMAGE_PREPROCESSING", true)
