@@ -136,8 +136,16 @@ func main() {
 	// main API's /list-shop and only the shop's owner (role 2) gets through.
 	// See internal/shopbrain.
 	brainHandlers := &shopbrain.Handlers{Svc: shopbrain.NewService(shopbrain.NewOwnerVerifier(configs.MAIN_API_URL))}
+	if configs.BRAIN_MONGO_URI != "" {
+		brainHandlers.Store = shopbrain.NewMongoFeedback(configs.BRAIN_MONGO_URI, configs.BRAIN_MONGO_DB)
+	}
 	billscan.GET("/api/v1/shop-brain", brainHandlers.GetShopBrain)
 	billscan.GET("/api/v1/shop-brain/export", brainHandlers.ExportShopBrain)
+	billscan.GET("/api/v1/shop-brain/quiz", brainHandlers.GetQuiz)
+	billscan.GET("/api/v1/shop-brain/parties", brainHandlers.SearchParties)
+	billscan.POST("/api/v1/shop-brain/ask", brainHandlers.AskBrain)
+	billscan.POST("/api/v1/shop-brain/feedback", brainHandlers.PostFeedback)
+	billscan.GET("/api/v1/shop-brain/feedback/summary", brainHandlers.GetFeedbackSummary)
 
 	// Step 4: Setup HTTP server with timeouts.
 	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute

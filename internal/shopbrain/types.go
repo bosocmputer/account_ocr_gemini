@@ -436,4 +436,11 @@ type Brain struct {
 	Watermark   Watermark         `json:"watermark"`
 	Index       map[string]string `json:"journal_index,omitempty"` // guidfixed → content hash, for the next run's diff
 	Diff        *Diff             `json:"diff,omitempty"`
+
+	// Kept in memory (not serialized) for the quiz and "ask the brain".
+	entries []entry             // oldest first, same order as guesses
+	guesses []Guess             // what the ladder guessed for each entry from the entries before it
+	shapes  map[string]Shape    // full key → shape
+	byKey   map[string]*Pattern // pattern key → pattern
+	chart   map[string]Account
 }
