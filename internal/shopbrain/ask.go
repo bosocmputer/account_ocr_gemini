@@ -129,6 +129,14 @@ type AskInput struct {
 	Amount      float64 `json:"amount,omitempty" bson:"amount,omitempty"` // document total (sum of debits, incl. VAT)
 }
 
+// Empty reports an input with nothing to look up: no party, tax id, document
+// format or description. Many shops never set a document format, so it is
+// not required on its own.
+func (in AskInput) Empty() bool {
+	return strings.TrimSpace(in.PartyCode) == "" && strings.TrimSpace(in.TaxID) == "" &&
+		strings.TrimSpace(in.DocFormat) == "" && strings.TrimSpace(in.Description) == ""
+}
+
 type LevelCheck struct {
 	Level       Level   `json:"level"`
 	Status      string  `json:"status"` // used | not_seen | not_consistent | no_input
