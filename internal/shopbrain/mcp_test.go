@@ -156,6 +156,26 @@ func TestMCPRejectsMissingWrongExpiredRevokedAndOtherShop(t *testing.T) {
 	}
 }
 
+func TestMCPKeyInURLForAppsWithoutAHeaderField(t *testing.T) {
+	srv, _, plain := mcpTestServer(t)
+	if s := postStatus(t, srv.URL+"?shopid=SHOP1&key="+plain, ""); s != http.StatusOK {
+		t.Errorf("key in URL = %d", s)
+	}
+	if s := postStatus(t, srv.URL+"?shopid=OTHER&key="+plain, ""); s != http.StatusForbidden {
+		t.Errorf("key in URL for another shop = %d", s)
+	}
+	if s := postStatus(t, srv.URL+"?key=sbk_wrong", ""); s != http.StatusUnauthorized {
+		t.Errorf("wrong key in URL = %d", s)
+	}
+	got := RedactKey("/billscan/mcp?shopid=S1&key=" + plain + "&x=1")
+	if strings.Contains(got, plain) || got != "/billscan/mcp?shopid=S1&key=***&x=1" {
+		t.Errorf("access log must hide the key: %s", got)
+	}
+	if RedactKey("/billscan/mcp?key="+plain) != "/billscan/mcp?key=***" {
+		t.Errorf("first param not hidden")
+	}
+}
+
 func TestMCPToolsAreReadOnlyAndAnswerFromTheTokensShop(t *testing.T) {
 	srv, tokens, plain := mcpTestServer(t)
 	cs := connect(t, srv.URL+"?shopid=SHOP1", plain)

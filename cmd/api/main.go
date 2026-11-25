@@ -47,7 +47,10 @@ func main() {
 	batchocr.StartResume()
 
 	// Step 2: Initialize the Gin router
-	router := gin.Default()
+	// gin.Default() minus its logger: the access log here hides the MCP
+	// connection key that apps without a header field put in the URL (?key=sbk_…)
+	router := gin.New()
+	router.Use(gin.LoggerWithFormatter(shopbrain.AccessLogLine), gin.Recovery())
 
 	// Add CORS middleware - configure allowed origins for production
 	router.Use(func(c *gin.Context) {
