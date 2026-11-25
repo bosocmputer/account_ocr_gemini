@@ -42,7 +42,6 @@ type Options struct {
 	// The page measures each one from this shop's data and feedback.
 	TargetAccuracy float64 `json:"target_accuracy"` // right share of the bills the brain answered (backtest)
 	TargetCoverage float64 `json:"target_coverage"` // share of bills the brain answers
-	TargetVerdicts int     `json:"target_verdicts"` // owner checks given on the check page
 	MinMeasured    int     `json:"min_measured"`    // answered bills needed before accuracy is reported at all
 }
 
@@ -52,7 +51,7 @@ func DefaultOptions(now time.Time) Options {
 		// chosen by replaying 4 production shops (2026-11-25): wrong answers on
 		// bills fell from 8–27% to 2–9%, at the cost of answering fewer.
 		WilsonZ: 1.28, RecentAgree: 2, StatementDirection: true,
-		TargetAccuracy: 0.98, TargetCoverage: 0.6, TargetVerdicts: 30, MinMeasured: 20}
+		TargetAccuracy: 0.98, TargetCoverage: 0.6, MinMeasured: 20}
 }
 
 // confidence is the share a key's leading shape is judged by: the raw share,

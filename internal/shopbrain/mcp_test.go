@@ -235,12 +235,12 @@ func TestComputeReadinessMatchesThePage(t *testing.T) {
 	b := &Brain{Options: DefaultOptions(now)}
 	b.Readiness = Readiness{Journals: 500, LastEntry: time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)}
 	b.Backtest.BySource = map[Source]*HitStat{SourceImage: {Total: 300, Predicted: 150, HitAccounts: 144}}
-	if r := ComputeReadiness(b, 0, true, now); r.Score == nil || *r.Score != 58 {
-		t.Errorf("score = %v, want 58: %+v", r.ScoreText(), r.Conditions)
+	if r := ComputeReadiness(b, now); r.Score == nil || *r.Score != 78 {
+		t.Errorf("score = %v, want 78: %+v", r.ScoreText(), r.Conditions)
 	}
 	b.Readiness = Readiness{} // brand-new shop: only "data" counts
 	b.Backtest.BySource = map[Source]*HitStat{}
-	if r := ComputeReadiness(b, 0, true, now); r.Score == nil || *r.Score != 0 {
+	if r := ComputeReadiness(b, now); r.Score == nil || *r.Score != 0 {
 		t.Errorf("new shop score = %v", r.ScoreText())
 	}
 }

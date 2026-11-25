@@ -314,18 +314,7 @@ func journalIndex(b *Brain, docno, guid string) int {
 }
 
 func (h *Handlers) mcpOverview(ctx context.Context, a mcpAuth, b *Brain) (string, any, error) {
-	verdicts, known := 0, false
-	if h.Store != nil {
-		if list, err := h.Store.List(ctx, a.shopID); err == nil {
-			known = true
-			for _, f := range list {
-				if f.Mode == "quiz" {
-					verdicts++
-				}
-			}
-		}
-	}
-	rd := ComputeReadiness(b, verdicts, known, time.Now())
+	rd := ComputeReadiness(b, time.Now())
 	usable := 0
 	for _, p := range b.Patterns {
 		if p.Usable {
