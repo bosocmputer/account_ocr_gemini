@@ -117,6 +117,7 @@ type QuizJournal struct {
 type QuizItem struct {
 	Journal      QuizJournal `json:"journal"`
 	Guess        GuessView   `json:"guess"`
+	Evidence     []Evidence  `json:"evidence"` // why the brain guessed this: every ladder key, from journals before this one
 	Actual       ShapeView   `json:"actual"`
 	MatchAccount bool        `json:"match_accounts"` // automatic comparison, before the owner judges
 	MatchFull    bool        `json:"match_full"`
@@ -198,7 +199,125 @@ func (b *Brain) QuizWithStats(o QuizOptions) (*QuizItem, QuizStats) {
 		MatchAccount: g.Known() && g.Accounts == e.shape.Accounts,
 		MatchFull:    g.Known() && g.Full == e.shape.fullKey(),
 		Pool:         len(all),
+		Evidence:     b.evidence(i, g),
 	}, st
+}
+
+// ---------- evidence ----------
+
+// EvidenceRef is one earlier journal behind a vote, for the owner to open.
+type EvidenceRef struct {
+	GuidFixed string    `json:"guidfixed"`
+	DocNo     string    `json:"docno"`
+	DocDate   time.Time `json:"docdate"`
+}
+
+// EvidenceVote is one way the earlier journals under a key were booked.
+type EvidenceVote struct {
+	Shape    ShapeView     `json:"shape"`
+	Count    int           `json:"count"`
+	Examples []EvidenceRef `json:"examples,omitempty"` // latest first
+}
+
+// Evidence is what one ladder key had seen before the quizzed journal, and
+// what the brain did with it.
+type Evidence struct {
+	Level          Level          `json:"level"`
+	Label          string         `json:"label"`  // the key in words: the party, the description, …
+	Status         string         `json:"status"` // used | not_seen | too_few | not_consistent | not_needed
+	Total          int            `json:"total"`  // earlier journals under the key
+	MinSupport     int            `json:"min_support"`
+	MinConsistency float64        `json:"min_consistency"`
+	Votes          []EvidenceVote `json:"votes,omitempty"` // most used first, at most 3
+}
+
+const (
+	evidenceVotes    = 3
+	evidenceExamples = 2
+)
+
+// evidence recounts, for each ladder key of entries[i], the journals learned
+// before it — the same ones the guess was made from (replay learns in order).
+func (b *Brain) evidence(i int, g Guess) []Evidence {
+	e := b.entries[i]
+	out := make([]Evidence, 0, len(e.keys))
+	for _, k := range e.keys {
+		ev := Evidence{Level: k.level, Label: keyLabel(k.level, e), MinSupport: minSupport(k.level), MinConsistency: b.Options.minConsistency(k.level)}
+		counts := map[string]int{}
+		refs := map[string][]EvidenceRef{}
+		for j := i - 1; j >= 0; j-- { // newest first, so examples are the latest ones
+			p := b.entries[j]
+			if !hasKey(p.keys, k.key) {
+				continue
+			}
+			full := p.shape.fullKey()
+			counts[full]++
+			if len(refs[full]) < evidenceExamples {
+				refs[full] = append(refs[full], EvidenceRef{GuidFixed: p.j.GuidFixed, DocNo: p.j.DocNo, DocDate: p.j.DocDate})
+			}
+			ev.Total++
+		}
+		fulls := make([]string, 0, len(counts))
+		for f := range counts {
+			fulls = append(fulls, f)
+		}
+		sort.Slice(fulls, func(a, c int) bool {
+			if counts[fulls[a]] != counts[fulls[c]] {
+				return counts[fulls[a]] > counts[fulls[c]]
+			}
+			return fulls[a] < fulls[c]
+		})
+		for n, f := range fulls {
+			if n == evidenceVotes {
+				break
+			}
+			ev.Votes = append(ev.Votes, EvidenceVote{Shape: b.shapeView(f), Count: counts[f], Examples: refs[f]})
+		}
+		switch {
+		case g.Known() && k.key == g.Key:
+			ev.Status = "used"
+		case g.Known() && levelRank(k.level) > levelRank(g.Level):
+			ev.Status = "not_needed"
+		case ev.Total == 0:
+			ev.Status = "not_seen"
+		case ev.Total < ev.MinSupport:
+			ev.Status = "too_few"
+		default:
+			ev.Status = "not_consistent"
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func hasKey(keys []ladderKey, key string) bool {
+	for _, k := range keys {
+		if k.key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// keyLabel puts a ladder key in the owner's words.
+func keyLabel(l Level, e entry) string {
+	switch l {
+	case LevelTaxID:
+		return e.party.TaxID
+	case LevelParty:
+		if e.party.Name != "" {
+			return e.party.Name + " (" + e.party.Code + ")"
+		}
+		return e.party.Code
+	case LevelDesc:
+		return normalizeDescription(e.j.AccountDescription)
+	default:
+		f := e.j.DocFormat
+		if f == "" {
+			f = "ไม่ระบุ"
+		}
+		return "ประเภทเอกสาร " + f + " • สมุด " + e.j.BookCode
+	}
 }
 
 func (b *Brain) quizJournal(e entry) QuizJournal {
