@@ -94,11 +94,10 @@ type expTally struct {
 
 type expStat struct {
 	total, predicted, hitAcc, hitFull int
-	byLevel                           map[Level]*[3]int // predicted, hitAcc, hitFull
+	byLevel                           map[Level]*[3]int  // predicted, hitAcc, hitFull
 	bySource                          map[Source]*[3]int // total, predicted, hitAcc
 	wrong                             []string
 }
-
 
 func expKeys(e entry, r expRule, anchor map[string]string) []ladderKey {
 	dir := ""

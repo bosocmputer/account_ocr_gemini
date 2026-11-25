@@ -126,7 +126,7 @@ type AskInput struct {
 	DocFormat   string  `json:"docformat" bson:"docformat"`
 	BookCode    string  `json:"bookcode,omitempty" bson:"bookcode,omitempty"`
 	Description string  `json:"description,omitempty" bson:"description,omitempty"`
-	Amount      float64 `json:"amount,omitempty" bson:"amount,omitempty"` // document total (sum of debits, incl. VAT)
+	Amount      float64 `json:"amount,omitempty" bson:"amount,omitempty"`       // document total (sum of debits, incl. VAT)
 	Direction   string  `json:"direction,omitempty" bson:"direction,omitempty"` // bank statement: in | out (optional)
 }
 

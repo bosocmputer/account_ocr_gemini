@@ -228,10 +228,10 @@ type Evidence struct {
 	Total          int            `json:"total"`  // earlier journals under the key
 	MinSupport     int            `json:"min_support"`
 	MinConsistency float64        `json:"min_consistency"`
-	Confidence     float64        `json:"confidence"`   // what the bar is compared with: the leading share, or its Wilson lower bound
-	Wilson         bool           `json:"wilson"`       // Confidence is a Wilson lower bound
-	RecentNeed     int            `json:"recent_need"`  // last N journals that must match the leading shape (0 = no check)
-	RecentAgree    bool           `json:"recent_agree"` // they do
+	Confidence     float64        `json:"confidence"`      // what the bar is compared with: the leading share, or its Wilson lower bound
+	Wilson         bool           `json:"wilson"`          // Confidence is a Wilson lower bound
+	RecentNeed     int            `json:"recent_need"`     // last N journals that must match the leading shape (0 = no check)
+	RecentAgree    bool           `json:"recent_agree"`    // they do
 	Votes          []EvidenceVote `json:"votes,omitempty"` // most used first, at most 3
 }
 
@@ -250,7 +250,7 @@ func (b *Brain) evidence(i int, g Guess) []Evidence {
 			Wilson: b.Options.WilsonZ > 0, RecentNeed: b.Options.RecentAgree}
 		counts := map[string]int{}
 		refs := map[string][]EvidenceRef{}
-		var recent []string // newest first while scanning
+		var recent []string           // newest first while scanning
 		for j := i - 1; j >= 0; j-- { // newest first, so examples are the latest ones
 			p := b.entries[j]
 			if !hasKey(p.keys, k.key) {
