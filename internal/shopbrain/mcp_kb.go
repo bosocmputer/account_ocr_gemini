@@ -227,8 +227,13 @@ func refText(label string, r RefJournal) string {
 	if r.Description != "" {
 		fmt.Fprintf(&b, "  คำอธิบาย: %s\n", r.Description)
 	}
-	if r.DocFormat != "" || r.BookCode != "" {
-		fmt.Fprintf(&b, "  ประเภทเอกสาร %s • สมุด %s\n", orDash(r.DocFormat), orDash(r.BookCode))
+	switch {
+	case r.DocFormat != "" && r.BookCode != "":
+		fmt.Fprintf(&b, "  ประเภทเอกสาร %s • สมุด %s\n", r.DocFormat, r.BookCode)
+	case r.DocFormat != "":
+		fmt.Fprintf(&b, "  ประเภทเอกสาร %s\n", r.DocFormat)
+	case r.BookCode != "":
+		fmt.Fprintf(&b, "  สมุด %s\n", r.BookCode)
 	}
 	for _, l := range r.Lines {
 		if l.Debit != 0 {
@@ -497,7 +502,13 @@ func (b *Brain) suggestBooking(in mcpSuggestInput) Suggestion {
 				s.OtherWays = append(s.OtherWays, OtherWay{Shape: b.variantView(o, 0), Count: o.Count})
 			}
 			b.fillRefs(&s, p, "")
-			s.RefsNote = fmt.Sprintf("เคยบันทึก%s %d รายการ แต่ลงไม่สม่ำเสมอพอ (ไม่ผ่านเกณฑ์) — ใช้ดูประกอบเท่านั้น ห้ามเลือกแบบใดแบบหนึ่งแทนผู้ใช้", s.MatchedBy, s.RefsTotal)
+			why := "แต่ลงหลายแบบ ไม่สม่ำเสมอพอ"
+			if len(p.Others) == 0 {
+				// one way only, but too few journals to pass the bar
+				why = fmt.Sprintf("ลงแบบเดียวกันทุกครั้ง แต่จำนวนยังน้อยเกินกว่าจะมั่นใจ (เกณฑ์ความมั่นใจ %.0f%%)", b.Options.minConsistency(p.Level)*100)
+				s.Reason = fmt.Sprintf("เคยเห็นเพียง %d ครั้ง ยังน้อยเกินกว่าจะมั่นใจ จึงตอบว่าไม่รู้", p.Total)
+			}
+			s.RefsNote = fmt.Sprintf("เคยบันทึก%s %d รายการ %s (ไม่ผ่านเกณฑ์) — ใช้ดูประกอบเท่านั้น ห้ามเลือกแบบใดแบบหนึ่งแทนผู้ใช้", s.MatchedBy, s.RefsTotal, why)
 			break
 		}
 	}
@@ -859,18 +870,19 @@ func (b *Brain) searchJournals(in mcpSearchJournalsInput) (JournalSearch, error)
 	limit := clampLimit(in.Limit, refsDefault, refsMax)
 	out := JournalSearch{Offset: max(in.Offset, 0), Refs: []RefJournal{}}
 	var sum int64
-	for i := len(b.entries) - 1; i >= 0; i-- { // newest first
-		e := b.entries[i]
-		if !keep(e) {
-			continue
+	var hit []int
+	for i, e := range b.entries {
+		if keep(e) {
+			hit = append(hit, i)
+			sum += satang(e.total)
 		}
-		if out.Matched >= out.Offset && len(out.Refs) < limit {
-			out.Refs = append(out.Refs, b.refJournal(e))
-		}
-		out.Matched++
-		sum += satang(e.total)
 	}
-	out.Total = baht(sum)
+	// newest document date first (entries are in the order they were saved)
+	sort.SliceStable(hit, func(a, c int) bool { return b.entries[hit[a]].j.DocDate.After(b.entries[hit[c]].j.DocDate) })
+	out.Matched, out.Total = len(hit), baht(sum)
+	for n := out.Offset; n < len(hit) && len(out.Refs) < limit; n++ {
+		out.Refs = append(out.Refs, b.refJournal(b.entries[hit[n]]))
+	}
 	return out, nil
 }
 

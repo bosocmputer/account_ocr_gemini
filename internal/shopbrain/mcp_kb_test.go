@@ -113,6 +113,15 @@ func TestSearchAndSummarize(t *testing.T) {
 	}
 }
 
+func TestSearchSortsByDocumentDate(t *testing.T) {
+	b := build(t)
+	b.entries[0].j.DocDate = day(30) // saved first, dated last
+	res, _ := b.searchJournals(mcpSearchJournalsInput{})
+	if res.Refs[0].GuidFixed != b.entries[0].j.GuidFixed {
+		t.Errorf("first = %s, want the latest document date", res.Refs[0].DocNo)
+	}
+}
+
 func TestMoney(t *testing.T) {
 	for in, want := range map[float64]string{0: "0.00", 4.515: "4.52", 1234567.8: "1,234,567.80", -1000: "-1,000.00", 100: "100.00"} {
 		if got := money(in); got != want {
