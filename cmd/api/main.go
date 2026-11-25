@@ -58,7 +58,7 @@ func main() {
 		// the preflight allow-list, browsers silently block the polling
 		// request before it's ever sent (curl doesn't enforce CORS at all,
 		// so this gap only shows up as a browser-side "network error").
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Job-Token")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Job-Token, Mcp-Protocol-Version, Mcp-Session-Id")
 		c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 
 		if c.Request.Method == "OPTIONS" {
@@ -137,7 +137,8 @@ func main() {
 	// See internal/shopbrain.
 	brainHandlers := &shopbrain.Handlers{Svc: shopbrain.NewService(shopbrain.NewOwnerVerifier(configs.MAIN_API_URL))}
 	if configs.BRAIN_MONGO_URI != "" {
-		brainHandlers.Store = shopbrain.NewMongoFeedback(configs.BRAIN_MONGO_URI, configs.BRAIN_MONGO_DB)
+		store := shopbrain.NewMongoFeedback(configs.BRAIN_MONGO_URI, configs.BRAIN_MONGO_DB)
+		brainHandlers.Store, brainHandlers.Tokens = store, store
 	}
 	billscan.GET("/api/v1/shop-brain", brainHandlers.GetShopBrain)
 	billscan.GET("/api/v1/shop-brain/export", brainHandlers.ExportShopBrain)
@@ -146,6 +147,12 @@ func main() {
 	billscan.POST("/api/v1/shop-brain/ask", brainHandlers.AskBrain)
 	billscan.POST("/api/v1/shop-brain/feedback", brainHandlers.PostFeedback)
 	billscan.GET("/api/v1/shop-brain/feedback/summary", brainHandlers.GetFeedbackSummary)
+	// MCP (read-only): any MCP client (Claude, Codex, Gemini …) talks to one
+	// shop's brain with a per-shop token the owner creates on the page.
+	billscan.GET("/api/v1/shop-brain/mcp-tokens", brainHandlers.ListMCPTokens)
+	billscan.POST("/api/v1/shop-brain/mcp-tokens", brainHandlers.CreateMCPToken)
+	billscan.POST("/api/v1/shop-brain/mcp-tokens/:id/revoke", brainHandlers.RevokeMCPToken)
+	billscan.Any("/mcp", gin.WrapH(brainHandlers.MCPHandler()))
 
 	// Step 4: Setup HTTP server with timeouts.
 	// WriteTimeout no longer needs to cover the AI pipeline's own 5-minute

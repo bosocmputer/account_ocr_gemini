@@ -146,6 +146,7 @@ type MongoFeedback struct {
 	URI, DB string
 
 	mu       sync.Mutex
+	db       *mongo.Database
 	coll     *mongo.Collection
 	lastFail time.Time
 }
@@ -182,13 +183,29 @@ func (m *MongoFeedback) collection(ctx context.Context) (*mongo.Collection, erro
 		}
 		return nil, errors.Join(ErrStoreUnavailable, err)
 	}
-	coll := client.Database(m.DB).Collection("brain_feedback")
+	db := client.Database(m.DB)
+	coll := db.Collection("brain_feedback")
 	_, _ = coll.Indexes().CreateMany(cctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "shopid", Value: 1}, {Key: "created_at", Value: -1}}},
 		{Keys: bson.D{{Key: "shopid", Value: 1}, {Key: "journal_guid", Value: 1}}},
 	})
-	m.coll = coll
+	_, _ = db.Collection(mcpTokensColl).Indexes().CreateMany(cctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "hash", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "shopid", Value: 1}, {Key: "created_at", Value: -1}}},
+	})
+	_, _ = db.Collection(mcpCallsColl).Indexes().CreateMany(cctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "token_id", Value: 1}, {Key: "at", Value: -1}}},
+	})
+	m.db, m.coll = db, coll
 	return coll, nil
+}
+
+// database returns the brain's own database (same lazy connection as feedback).
+func (m *MongoFeedback) database(ctx context.Context) (*mongo.Database, error) {
+	if _, err := m.collection(ctx); err != nil {
+		return nil, err
+	}
+	return m.db, nil
 }
 
 func (m *MongoFeedback) Save(ctx context.Context, f Feedback) error {
