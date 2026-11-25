@@ -166,7 +166,7 @@ func TestMCPToolsAreReadOnlyAndAnswerFromTheTokensShop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"brain_overview": true, "ask_brain": true, "search_parties": true, "search_accounts": true, "list_patterns": true, "get_pattern": true, "explain_journal": true}
+	want := map[string]bool{"brain_overview": true, "suggest_booking": true, "search_journals": true, "summarize": true, "get_journal": true, "search_parties": true, "search_accounts": true}
 	if len(lt.Tools) != len(want) {
 		t.Errorf("tools = %d, want %d", len(lt.Tools), len(want))
 	}
@@ -188,29 +188,32 @@ func TestMCPToolsAreReadOnlyAndAnswerFromTheTokensShop(t *testing.T) {
 	if r := call("brain_overview", map[string]any{}); r.IsError || !strings.Contains(text(r), "สมองพร้อมใช้งาน") {
 		t.Errorf("overview: %+v", r)
 	}
-	// the fixture's creditor C1 is answered by tax id (mechanics options)
-	r := call("ask_brain", map[string]any{"party_code": "C1", "party_kind": "creditor", "docformat": "PV", "amount": 1070})
-	if r.IsError || !strings.HasPrefix(text(r), "ลงบัญชี:") || len(r.Content) != 2 {
-		t.Errorf("ask_brain: %s", text(r))
+	// a bill from creditor C1, read by the AI: name + tax id + amounts, no docformat
+	r := call("suggest_booking", map[string]any{"party_name": "บริษัท ผู้ขาย C1 จำกัด", "taxid": "0105500000001", "total_amount": 1070, "vat_amount": 70})
+	if r.IsError || len(r.Content) != 2 || !strings.Contains(text(r), "REF 1: PVj3") || !strings.Contains(text(r), "Dr 51212") {
+		t.Errorf("suggest_booking: %s", text(r))
 	}
-	var ans AskAnswer
-	if err := json.Unmarshal([]byte(r.Content[1].(*mcp.TextContent).Text), &ans); err != nil || !ans.Known {
-		t.Errorf("ask_brain JSON: %v %+v", err, ans)
+	var sg Suggestion
+	if err := json.Unmarshal([]byte(r.Content[1].(*mcp.TextContent).Text), &sg); err != nil || !sg.Known || len(sg.Refs) != 3 {
+		t.Errorf("suggest_booking JSON: %v %+v", err, sg)
 	}
-	if r := call("ask_brain", map[string]any{}); !r.IsError {
-		t.Errorf("empty ask must be an error result")
+	if r := call("suggest_booking", map[string]any{}); !r.IsError {
+		t.Errorf("empty suggest must be an error result")
+	}
+	if r := call("search_journals", map[string]any{"party": "C1"}); r.IsError || !strings.HasPrefix(text(r), "พบ 3 รายการ") {
+		t.Errorf("search_journals: %s", text(r))
+	}
+	if r := call("summarize", map[string]any{"group_by": "account", "account": "51212"}); r.IsError || !strings.Contains(text(r), "51212 ค่าขนส่ง: Dr 600.00") {
+		t.Errorf("summarize: %s", text(r))
+	}
+	if r := call("search_journals", map[string]any{"date_from": "bad"}); !r.IsError {
+		t.Errorf("bad date must be an error result")
 	}
 	if r := call("search_parties", map[string]any{"query": "C1"}); r.IsError {
 		t.Errorf("search_parties: %s", text(r))
 	}
-	if r := call("list_patterns", map[string]any{"limit": 5}); r.IsError || !strings.Contains(text(r), "แสดง") {
-		t.Errorf("list_patterns: %s", text(r))
-	}
-	if r := call("get_pattern", map[string]any{"id": "PAT-NOPE"}); !r.IsError {
-		t.Errorf("unknown pattern must be an error result")
-	}
-	if r := call("explain_journal", map[string]any{"guidfixed": "j2"}); r.IsError {
-		t.Errorf("explain_journal: %s", text(r))
+	if r := call("get_journal", map[string]any{"guidfixed": "j2"}); r.IsError || !strings.Contains(text(r), "PVj2") {
+		t.Errorf("get_journal: %s", text(r))
 	}
 
 	time.Sleep(100 * time.Millisecond) // usage log is written off the request path

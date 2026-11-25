@@ -177,6 +177,11 @@ type AskAnswer struct {
 // Ask answers from the shop's current patterns (recency-weighted, the same
 // ones the page lists) for a journal described by the input.
 func (b *Brain) Ask(in AskInput) AskAnswer {
+	return b.askKeys(in, b.askLadder(in))
+}
+
+// askLadder builds the ladder keys of a journal described by the input.
+func (b *Brain) askLadder(in AskInput) []ladderKey {
 	j := Journal{DocFormat: strings.TrimSpace(in.DocFormat), BookCode: strings.TrimSpace(in.BookCode), AccountDescription: in.Description}
 	kind := in.PartyKind
 	taxID := validTaxID(in.TaxID)
@@ -199,8 +204,10 @@ func (b *Brain) Ask(in AskInput) AskAnswer {
 	} else if taxID != "" {
 		j.Vats = []rawVat{{CustTaxID: taxID}}
 	}
+	return keysFor(j, counterparty(j))
+}
 
-	keys := keysFor(j, counterparty(j))
+func (b *Brain) askKeys(in AskInput, keys []ladderKey) AskAnswer {
 	have := map[Level]bool{}
 	for _, k := range keys {
 		have[k.level] = true
