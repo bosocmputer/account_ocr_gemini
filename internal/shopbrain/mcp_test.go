@@ -164,6 +164,13 @@ func TestMCPKeyInURLForAppsWithoutAHeaderField(t *testing.T) {
 	if s := postStatus(t, srv.URL+"?shopid=OTHER&key="+plain, ""); s != http.StatusForbidden {
 		t.Errorf("key in URL for another shop = %d", s)
 	}
+	// a header that is not a shop-brain token (some apps send their own) falls back to the key in the URL
+	if s := postStatus(t, srv.URL+"?shopid=SHOP1&key="+plain, "Bearer something-else"); s != http.StatusOK {
+		t.Errorf("foreign header + key in URL = %d", s)
+	}
+	if s := postStatus(t, srv.URL+"?key=%3C%E0%B8%A7%E0%B8%B2%E0%B8%87"+"sbk", ""); s != http.StatusUnauthorized {
+		t.Errorf("placeholder left in the URL = %d", s)
+	}
 	if s := postStatus(t, srv.URL+"?key=sbk_wrong", ""); s != http.StatusUnauthorized {
 		t.Errorf("wrong key in URL = %d", s)
 	}

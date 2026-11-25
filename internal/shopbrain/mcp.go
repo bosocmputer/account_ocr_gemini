@@ -103,17 +103,23 @@ func (h *Handlers) mcpAuthenticate(r *http.Request) (mcpAuth, int, string) {
 		return mcpAuth{}, http.StatusServiceUnavailable, "mcp_unavailable"
 	}
 	tok := strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
-	if tok == "" {
+	from := "header"
+	if !strings.HasPrefix(tok, MCPTokenPrefix) {
 		// apps whose "add server" form has a URL field only (Claude Desktop
 		// custom connector, Codex app) carry the key in the URL
-		tok = strings.TrimSpace(r.URL.Query().Get(MCPKeyParam))
+		if q := strings.TrimSpace(r.URL.Query().Get(MCPKeyParam)); q != "" || tok == "" {
+			tok, from = q, "url"
+		}
 	}
 	if !strings.HasPrefix(tok, MCPTokenPrefix) {
+		// why, without the key itself: where it came from, its length, and whether it looks like a token
+		log.Printf("shopbrain mcp: 401 missing_or_invalid_token from=%s len=%d header_present=%t", from, len(tok), r.Header.Get("Authorization") != "")
 		return mcpAuth{}, http.StatusUnauthorized, "missing_or_invalid_token"
 	}
 	t, err := h.Tokens.FindToken(r.Context(), HashMCPToken(tok))
 	switch {
 	case errors.Is(err, ErrTokenInvalid):
+		log.Printf("shopbrain mcp: 401 invalid_token from=%s (well-formed but unknown: another system's token, or mistyped)", from)
 		return mcpAuth{}, http.StatusUnauthorized, "invalid_token"
 	case err != nil:
 		return mcpAuth{}, http.StatusServiceUnavailable, "mcp_unavailable"
