@@ -26,12 +26,67 @@ type Options struct {
 	// instead of guessing. L4 (docformat + book) has its own, stricter bar.
 	MinConsistency       float64 `json:"min_consistency"`
 	MinConsistencyFormat float64 `json:"min_consistency_format"`
+	// WilsonZ > 0 compares the bars above with the Wilson lower bound of the
+	// leading share instead of the raw share, so few examples need a cleaner
+	// record (2/2 → 0.55, 3/3 → 0.65, 17/20 → 0.73 at z = 1.28).
+	WilsonZ float64 `json:"wilson_z"`
+	// RecentAgree > 0: the last N journals under the key must all have been
+	// booked like the leading shape (catches a shop that changed its booking).
+	RecentAgree int `json:"recent_agree"`
+	// StatementDirection adds money in/out to the keys of bank-statement
+	// journals: the same description ("transfer") is booked differently for a
+	// deposit and a withdrawal. The direction is the side of the statement's
+	// own bank account, which the statement row already tells.
+	StatementDirection bool `json:"statement_direction"`
 }
 
 func DefaultOptions(now time.Time) Options {
 	return Options{AsOf: now, HalfLifeDays: 180, CheckedBoost: 1.5, MaxExamples: 2, MaxImages: 2, MaxChanges: 5,
-		MinJournals: 100, MaxIdleDays: 90, MinBacktestGuess: 30, MinConsistency: 0.6, MinConsistencyFormat: 0.9}
+		MinJournals: 100, MaxIdleDays: 90, MinBacktestGuess: 30, MinConsistency: 0.6, MinConsistencyFormat: 0.9,
+		// chosen by replaying 4 production shops (2026-11-25): wrong answers on
+		// bills fell from 8–27% to 2–9%, at the cost of answering fewer.
+		WilsonZ: 1.28, RecentAgree: 2, StatementDirection: true}
 }
+
+// confidence is the share a key's leading shape is judged by: the raw share,
+// or its Wilson lower bound when WilsonZ is set.
+func (o Options) confidence(lead, n int) float64 {
+	if n <= 0 {
+		return 0
+	}
+	if o.WilsonZ <= 0 {
+		return float64(lead) / float64(n)
+	}
+	return wilsonLower(lead, n, o.WilsonZ)
+}
+
+func wilsonLower(k, n int, z float64) float64 {
+	p := float64(k) / float64(n)
+	nn := float64(n)
+	d := 1 + z*z/nn
+	c := p + z*z/(2*nn)
+	m := z * math.Sqrt(p*(1-p)/nn+z*z/(4*nn*nn))
+	return (c - m) / d
+}
+
+// recentAgrees reports whether the last o.RecentAgree shapes (newest last) all
+// equal lead. Always true when the check is off.
+func (o Options) recentAgrees(recent []string, lead string) bool {
+	if o.RecentAgree <= 0 {
+		return true
+	}
+	if len(recent) < o.RecentAgree {
+		return false
+	}
+	for _, f := range recent[len(recent)-o.RecentAgree:] {
+		if f != lead {
+			return false
+		}
+	}
+	return true
+}
+
+const keepRecent = 5 // shapes remembered per key for recentAgrees
 
 type entry struct {
 	j     Journal
@@ -43,6 +98,68 @@ type entry struct {
 	total float64
 	keys  []ladderKey
 	when  time.Time
+	dir   string // bank statement: "in" (deposit) / "out" (withdrawal); "" otherwise
+}
+
+// addStatementDirection finds each statement batch's own bank account — the
+// one present in every journal of the batch — and adds money in/out (its
+// side) to the keys of those journals.
+func addStatementDirection(entries []entry) {
+	type acc struct {
+		n      int
+		counts map[string]int
+	}
+	batches := map[string]*acc{}
+	for _, e := range entries {
+		if e.src != SourceStatement || e.j.BatchID == "" {
+			continue
+		}
+		b := batches[e.j.BatchID]
+		if b == nil {
+			b = &acc{counts: map[string]int{}}
+			batches[e.j.BatchID] = b
+		}
+		b.n++
+		seen := map[string]bool{}
+		for _, l := range e.lines {
+			if !seen[l.code] {
+				b.counts[l.code]++
+				seen[l.code] = true
+			}
+		}
+	}
+	anchor := map[string]string{}
+	for id, b := range batches {
+		best := ""
+		for code, c := range b.counts {
+			if c == b.n && (best == "" || code < best) {
+				best = code
+			}
+		}
+		anchor[id] = best
+	}
+	for i := range entries {
+		e := &entries[i]
+		a := anchor[e.j.BatchID]
+		if e.src != SourceStatement || a == "" {
+			continue
+		}
+		for _, l := range e.lines {
+			if l.code == a {
+				e.dir = map[bool]string{true: "in", false: "out"}[l.side == "D"]
+				break
+			}
+		}
+		if e.dir == "" {
+			continue
+		}
+		keys := make([]ladderKey, len(e.keys))
+		for j, k := range e.keys {
+			k.key += "|dir:" + e.dir
+			keys[j] = k
+		}
+		e.keys = keys
+	}
 }
 
 func prepare(journals []Journal, groups map[string]ImageGroup) []entry {
@@ -68,6 +185,9 @@ func prepare(journals []Journal, groups map[string]ImageGroup) []entry {
 // it can be tested with in-memory fixtures.
 func Build(master MasterData, journals []Journal, groups map[string]ImageGroup, decodeErrors int, opts Options) *Brain {
 	entries := prepare(journals, groups)
+	if opts.StatementDirection {
+		addStatementDirection(entries)
+	}
 	chart := map[string]Account{}
 	for _, a := range master.Accounts {
 		chart[a.Code] = a
@@ -158,7 +278,7 @@ func recencyWeight(when time.Time, opts Options) float64 {
 }
 
 func newPattern(k ladderKey, e entry) *Pattern {
-	p := &Pattern{ID: patternID(k.key), Level: k.level, Key: k.key, DocFormat: e.j.DocFormat,
+	p := &Pattern{ID: patternID(k.key), Level: k.level, Key: k.key, DocFormat: e.j.DocFormat, Direction: e.dir,
 		variants: map[string]*Variant{}, countsSoFar: map[string]int{}}
 	switch k.level {
 	case LevelTaxID:
@@ -175,6 +295,10 @@ func newPattern(k ladderKey, e entry) *Pattern {
 
 func (p *Pattern) add(e entry, w float64, opts Options) {
 	fk := e.shape.fullKey()
+	p.recent = append(p.recent, fk) // entries arrive oldest first
+	if len(p.recent) > keepRecent {
+		p.recent = p.recent[1:]
+	}
 	v := p.variants[fk]
 	if v == nil {
 		v = &Variant{Shape: e.shape, FirstSeen: e.when, Sources: map[Source]int{}, BookCodes: map[string]int{},
@@ -288,7 +412,9 @@ func (p *Pattern) finish(chart map[string]Account, opts Options) {
 	if totalW > 0 {
 		p.Consistency = round4(p.Winner.Weight / totalW)
 	}
-	p.Usable = p.Total >= minSupport(p.Level) && p.Consistency >= opts.minConsistency(p.Level)
+	bar := opts.minConsistency(p.Level)
+	p.Usable = p.Total >= minSupport(p.Level) && p.Consistency >= bar &&
+		opts.confidence(p.Winner.Count, p.Total) >= bar && opts.recentAgrees(p.recent, p.Winner.Shape.fullKey())
 	for _, v := range vs {
 		v.Weight = round4(v.Weight)
 	}

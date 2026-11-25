@@ -127,6 +127,30 @@ type AskInput struct {
 	BookCode    string  `json:"bookcode,omitempty" bson:"bookcode,omitempty"`
 	Description string  `json:"description,omitempty" bson:"description,omitempty"`
 	Amount      float64 `json:"amount,omitempty" bson:"amount,omitempty"` // document total (sum of debits, incl. VAT)
+	Direction   string  `json:"direction,omitempty" bson:"direction,omitempty"` // bank statement: in | out (optional)
+}
+
+// lookup finds the pattern for a key. Statement patterns carry money in/out
+// in their key; without a direction in the question, a key learned in only
+// one direction is used as is, and one learned both ways is ambiguous.
+func (b *Brain) lookup(key, dir string) (p *Pattern, ambiguous bool) {
+	if dir == "in" || dir == "out" {
+		if p = b.byKey[key+"|dir:"+dir]; p != nil {
+			return p, false
+		}
+		return b.byKey[key], false
+	}
+	if p = b.byKey[key]; p != nil {
+		return p, false
+	}
+	pin, pout := b.byKey[key+"|dir:in"], b.byKey[key+"|dir:out"]
+	switch {
+	case pin == nil:
+		return pout, false
+	case pout == nil:
+		return pin, false
+	}
+	return nil, true
 }
 
 // Empty reports an input with nothing to look up: no party, tax id, document
@@ -139,7 +163,7 @@ func (in AskInput) Empty() bool {
 
 type LevelCheck struct {
 	Level       Level   `json:"level"`
-	Status      string  `json:"status"` // used | not_seen | not_consistent | no_input
+	Status      string  `json:"status"` // used | not_seen | not_consistent | no_input | need_direction
 	Total       int     `json:"total,omitempty"`
 	Consistency float64 `json:"consistency,omitempty"`
 }
@@ -188,8 +212,10 @@ func (b *Brain) Ask(in AskInput) AskAnswer {
 		}
 	}
 	for _, k := range keys {
-		p := b.byKey[k.key]
+		p, ambiguous := b.lookup(k.key, in.Direction)
 		switch {
+		case ambiguous:
+			ans.Checks = append(ans.Checks, LevelCheck{Level: k.level, Status: "need_direction"})
 		case p == nil:
 			ans.Checks = append(ans.Checks, LevelCheck{Level: k.level, Status: "not_seen"})
 		case !p.Usable:
@@ -207,7 +233,13 @@ func (b *Brain) Ask(in AskInput) AskAnswer {
 	}
 	sort.SliceStable(ans.Checks, func(a, b int) bool { return levelRank(ans.Checks[a].Level) < levelRank(ans.Checks[b].Level) })
 	if !ans.Known {
-		if len(ans.Skipped) > 0 {
+		needDir := false
+		for _, c := range ans.Checks {
+			needDir = needDir || c.Status == "need_direction"
+		}
+		if needDir && len(ans.Skipped) == 0 {
+			ans.Reason = "รายการแบบนี้ร้านลงต่างกันระหว่างเงินเข้ากับเงินออก บอกด้วยว่าเงินเข้าหรือออก"
+		} else if len(ans.Skipped) > 0 {
 			ans.Reason = "เคยเห็นแต่ลงบัญชีไม่สม่ำเสมอพอ จึงตอบว่าไม่รู้"
 		} else {
 			ans.Reason = "ยังไม่เคยเห็นรายการแบบนี้มาก่อน"
