@@ -359,3 +359,35 @@ func TestBothOKCountsAsCorrect(t *testing.T) {
 		t.Errorf("%+v", s.Overall)
 	}
 }
+
+func TestQuizEvidenceMatchesTheGuess(t *testing.T) {
+	b := build(t)
+	// j1: nothing earlier → every key is "not seen", no votes.
+	q, _ := b.Quiz(QuizOptions{Days: 3650, Exclude: onlyJournal(b, "j1")})
+	for _, ev := range q.Evidence {
+		if ev.Status != "not_seen" || ev.Total != 0 || len(ev.Votes) != 0 {
+			t.Errorf("j1 evidence must be empty: %+v", ev)
+		}
+	}
+	// j2: guessed by tax ID from j1 → that key is "used", counts agree with the guess,
+	// the example is j1, and lower levels are "not needed".
+	q, _ = b.Quiz(QuizOptions{Days: 3650, Exclude: onlyJournal(b, "j2")})
+	var used *Evidence
+	for i, ev := range q.Evidence {
+		switch {
+		case ev.Status == "used":
+			used = &q.Evidence[i]
+		case levelRank(ev.Level) > levelRank(q.Guess.Level) && ev.Status != "not_needed":
+			t.Errorf("levels below the answer should be not_needed: %+v", ev)
+		}
+	}
+	if used == nil || used.Level != q.Guess.Level || used.Total != q.Guess.Support || used.Label == "" {
+		t.Fatalf("used evidence must match the guess %+v: %+v", q.Guess, used)
+	}
+	if v := used.Votes[0]; v.Shape.Accounts != q.Guess.Shape.Accounts || len(v.Examples) == 0 || v.Examples[0].GuidFixed != "j1" {
+		t.Errorf("leading vote must be the guessed shape learned from j1: %+v", v)
+	}
+	if share := float64(used.Votes[0].Count) / float64(used.Total); round4(share) != q.Guess.Consistency {
+		t.Errorf("vote share %.4f != guess consistency %.4f", share, q.Guess.Consistency)
+	}
+}
