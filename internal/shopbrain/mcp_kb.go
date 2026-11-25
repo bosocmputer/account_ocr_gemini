@@ -506,7 +506,6 @@ func (b *Brain) suggestBooking(in mcpSuggestInput) Suggestion {
 			if len(p.Others) == 0 {
 				// one way only, but too few journals to pass the bar
 				why = fmt.Sprintf("ลงแบบเดียวกันทุกครั้ง แต่จำนวนยังน้อยเกินกว่าจะมั่นใจ (เกณฑ์ความมั่นใจ %.0f%%)", b.Options.minConsistency(p.Level)*100)
-				s.Reason = fmt.Sprintf("เคยเห็นเพียง %d ครั้ง ยังน้อยเกินกว่าจะมั่นใจ จึงตอบว่าไม่รู้", p.Total)
 			}
 			s.RefsNote = fmt.Sprintf("เคยบันทึก%s %d รายการ %s (ไม่ผ่านเกณฑ์) — ใช้ดูประกอบเท่านั้น ห้ามเลือกแบบใดแบบหนึ่งแทนผู้ใช้", s.MatchedBy, s.RefsTotal, why)
 			break

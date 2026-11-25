@@ -1,6 +1,7 @@
 package shopbrain
 
 import (
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -213,6 +214,7 @@ func (b *Brain) askKeys(in AskInput, keys []ladderKey) AskAnswer {
 		have[k.level] = true
 	}
 	ans := AskAnswer{GuessView: GuessView{Level: levelNoMatch}}
+	mixed, fewest := false, 0 // a skipped key booked several ways / booked one way but seen too few times
 	for _, l := range allLevels {
 		if !have[l] {
 			ans.Checks = append(ans.Checks, LevelCheck{Level: l, Status: "no_input"})
@@ -227,6 +229,11 @@ func (b *Brain) askKeys(in AskInput, keys []ladderKey) AskAnswer {
 			ans.Checks = append(ans.Checks, LevelCheck{Level: k.level, Status: "not_seen"})
 		case !p.Usable:
 			ans.Checks = append(ans.Checks, LevelCheck{Level: k.level, Status: "not_consistent", Total: p.Total, Consistency: p.Consistency})
+			if len(p.Others) > 0 {
+				mixed = true
+			} else if fewest == 0 || p.Total < fewest {
+				fewest = p.Total
+			}
 			if p.Winner != nil {
 				ans.Skipped = append(ans.Skipped, SkipView{Level: k.level, Support: p.Total, Consistency: p.Consistency, WouldBe: b.variantView(p.Winner, in.Amount)})
 			}
@@ -246,6 +253,8 @@ func (b *Brain) askKeys(in AskInput, keys []ladderKey) AskAnswer {
 		}
 		if needDir && len(ans.Skipped) == 0 {
 			ans.Reason = "รายการแบบนี้ร้านลงต่างกันระหว่างเงินเข้ากับเงินออก บอกด้วยว่าเงินเข้าหรือออก"
+		} else if len(ans.Skipped) > 0 && !mixed && fewest > 0 {
+			ans.Reason = fmt.Sprintf("เคยเห็นเพียง %d ครั้ง ลงแบบเดียวกันทุกครั้ง แต่ยังน้อยเกินกว่าจะมั่นใจ จึงตอบว่าไม่รู้", fewest)
 		} else if len(ans.Skipped) > 0 {
 			ans.Reason = "เคยเห็นแต่ลงบัญชีไม่สม่ำเสมอพอ จึงตอบว่าไม่รู้"
 		} else {
