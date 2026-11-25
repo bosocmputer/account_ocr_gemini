@@ -192,7 +192,7 @@ func testTabRouter(t *testing.T, store FeedbackStore) (*gin.Engine, func()) {
 	var calls int32
 	srv := fakeMainAPI(t, &calls)
 	m, js, g := fixture()
-	brain := Build(m, js, g, 0, DefaultOptions(day(10)))
+	brain := Build(m, js, g, 0, mechanicsOptions(day(10)))
 	svc := NewService(NewOwnerVerifier(srv.URL))
 	svc.Load = func(ctx context.Context, shopID string) (*Brain, error) { return brain, nil }
 	h := &Handlers{Svc: svc, Store: store}

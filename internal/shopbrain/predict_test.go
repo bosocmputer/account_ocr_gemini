@@ -92,7 +92,7 @@ func TestPredictorMatchesLegacyBacktest(t *testing.T) {
 	for seed := int64(1); seed <= 40; seed++ {
 		r := rand.New(rand.NewSource(seed))
 		entries := prepare(randomJournals(r, 60+r.Intn(200)), nil)
-		opts := DefaultOptions(day(400))
+		opts := mechanicsOptions(day(400))
 		if seed%3 == 0 {
 			opts.MinConsistency, opts.MinConsistencyFormat = 0.5, 0.8
 		}

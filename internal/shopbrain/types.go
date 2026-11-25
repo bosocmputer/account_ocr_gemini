@@ -324,9 +324,10 @@ type Pattern struct {
 	MultiParty   bool          `json:"multi_party,omitempty"` // tax ID shared by several counterparty codes
 	Description  string        `json:"description,omitempty"`
 	BookCode     string        `json:"bookcode,omitempty"`
+	Direction    string        `json:"direction,omitempty"` // bank statement only: "in" / "out"
 	Total        int           `json:"total"`
 	Consistency  float64       `json:"consistency"` // winner weight ÷ total weight
-	Usable       bool          `json:"usable"`      // enough support and consistency to predict from (see Options.MinConsistency)
+	Usable       bool          `json:"usable"`      // passes the same bars as the predictor (support, consistency, Wilson, recent agreement)
 	Winner       *Variant      `json:"winner"`
 	Others       []*Variant    `json:"others,omitempty"`
 	Changes      []ShapeChange `json:"changes,omitempty"`
@@ -334,6 +335,7 @@ type Pattern struct {
 	variants     map[string]*Variant
 	countsSoFar  map[string]int
 	leader       string
+	recent       []string // last full keys under the key, newest last
 }
 
 // ---------- usage, backtest, readiness, diff ----------

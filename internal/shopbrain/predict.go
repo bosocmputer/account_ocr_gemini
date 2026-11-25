@@ -14,6 +14,7 @@ type tally struct {
 	accounts map[string]int
 	full     map[string]int
 	n        int
+	recent   []string // newest last, at most keepRecent
 }
 
 func newPredictor(opts Options) *predictor {
@@ -37,6 +38,7 @@ type Skip struct {
 	Support     int     `json:"support"`
 	Consistency float64 `json:"consistency"`
 	WouldBe     string  `json:"would_be"` // full key
+	Reason      string  `json:"reason"`   // not_consistent | not_recent
 }
 
 // Guess is one prediction. Level is levelNoMatch ("none") when the brain
@@ -62,8 +64,12 @@ func (p *predictor) predict(keys []ladderKey) Guess {
 		}
 		lead := topKey(t.full)
 		share := float64(t.full[lead]) / float64(t.n)
-		if share < p.opts.minConsistency(k.level) {
-			g.Skipped = append(g.Skipped, Skip{Level: k.level, Support: t.n, Consistency: round4(share), WouldBe: lead})
+		if p.opts.confidence(t.full[lead], t.n) < p.opts.minConsistency(k.level) {
+			g.Skipped = append(g.Skipped, Skip{Level: k.level, Support: t.n, Consistency: round4(share), WouldBe: lead, Reason: "not_consistent"})
+			continue
+		}
+		if !p.opts.recentAgrees(t.recent, lead) {
+			g.Skipped = append(g.Skipped, Skip{Level: k.level, Support: t.n, Consistency: round4(share), WouldBe: lead, Reason: "not_recent"})
 			continue
 		}
 		g.Level, g.Key, g.Accounts, g.Full = k.level, k.key, topKey(t.accounts), lead
@@ -85,5 +91,9 @@ func (p *predictor) learn(e entry) {
 		t.accounts[e.shape.Accounts]++
 		t.full[full]++
 		t.n++
+		t.recent = append(t.recent, full)
+		if len(t.recent) > keepRecent {
+			t.recent = t.recent[1:]
+		}
 	}
 }

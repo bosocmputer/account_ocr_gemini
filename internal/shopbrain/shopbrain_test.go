@@ -76,7 +76,7 @@ func fixture() (MasterData, []Journal, map[string]ImageGroup) {
 func build(t *testing.T) *Brain {
 	t.Helper()
 	m, js, g := fixture()
-	opts := DefaultOptions(day(10))
+	opts := mechanicsOptions(day(10))
 	return Build(m, js, g, 0, opts)
 }
 
@@ -209,7 +209,7 @@ func TestShapeChangeIsRecorded(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		js = append(js, purchase("b"+string(rune('0'+i)), 10+i, c, "51212", 100))
 	}
-	b := Build(m, js, g, 0, DefaultOptions(day(20)))
+	b := Build(m, js, g, 0, mechanicsOptions(day(20)))
 	p := findPattern(b, LevelParty, "party:creditor:C9|PV")
 	if p == nil || len(p.Changes) != 1 || !strings.Contains(p.Changes[0].To, "51212D") || p.Winner.Shape.Accounts != "11111C,11541D,51212D" {
 		t.Fatalf("expected one change to 51212: %+v", p)
@@ -218,7 +218,7 @@ func TestShapeChangeIsRecorded(t *testing.T) {
 
 func TestCompareFindsAddedChangedRemovedAndEmptyWhenSame(t *testing.T) {
 	m, js, g := fixture()
-	prev := Build(m, js, g, 0, DefaultOptions(day(10)))
+	prev := Build(m, js, g, 0, mechanicsOptions(day(10)))
 
 	// Round-trip through JSON like the CLI does with -prev.
 	data, _ := json.Marshal(prev)
@@ -226,7 +226,7 @@ func TestCompareFindsAddedChangedRemovedAndEmptyWhenSame(t *testing.T) {
 	if err := json.Unmarshal(data, &prevRT); err != nil {
 		t.Fatal(err)
 	}
-	same := Build(m, js, g, 0, DefaultOptions(day(11)))
+	same := Build(m, js, g, 0, mechanicsOptions(day(11)))
 	if d := Compare(&prevRT, same); !d.Empty() {
 		t.Fatalf("same data must give an empty diff: %+v", d.Totals)
 	}
@@ -235,7 +235,7 @@ func TestCompareFindsAddedChangedRemovedAndEmptyWhenSame(t *testing.T) {
 	edited[0].Details = []rawDetail{{AccountCode: "53000", Debit: 107}, {AccountCode: "11111", Credit: 107}} // re-booked
 	edited = edited[:len(edited)-1]                                                                          // j8 deleted
 	edited = append(edited, purchase("j9", 9, creditor("C1", "0105500000001"), "51212", 10))
-	d := Compare(&prevRT, Build(m, edited, g, 0, DefaultOptions(day(12))))
+	d := Compare(&prevRT, Build(m, edited, g, 0, mechanicsOptions(day(12))))
 	if d.Totals.Added != 1 || d.Totals.Changed != 1 || d.Totals.Removed != 1 || d.Added[0] != "j9" || d.Changed[0] != "j1" || d.Removed[0] != "j8" {
 		t.Fatalf("diff: %+v", d)
 	}
@@ -288,7 +288,7 @@ func TestLowConsistencyLevelIsSkippedInsteadOfGuessing(t *testing.T) {
 		js = append(js, Journal{GuidFixed: fmt.Sprint("x", i), DocNo: fmt.Sprint("JV", i), CreatedAt: day(i), DocDate: day(i), DocFormat: "JV", BookCode: "01",
 			Details: []rawDetail{{AccountCode: acct, Debit: 10}, {AccountCode: "11111", Credit: 10}}})
 	}
-	strict := DefaultOptions(day(10))
+	strict := mechanicsOptions(day(10))
 	b := Build(m, js, g, 0, strict)
 	if b.Backtest.Overall.Predicted != 0 || b.Backtest.Skipped[LevelFormat] == 0 {
 		t.Fatalf("inconsistent L4 must not predict: %+v skipped %v", b.Backtest.Overall, b.Backtest.Skipped)
@@ -312,7 +312,7 @@ func TestPlaceholderTaxIDIsIgnoredAndSharedTaxIDIsNotAttributed(t *testing.T) {
 	m, _, g := fixture()
 	walkIn := []Journal{purchase("w1", 1, creditor("W1", "-"), "53000", 10), purchase("w2", 2, creditor("W2", "-"), "53000", 10)}
 	shared := []Journal{purchase("s1", 3, creditor("S1", "0105500000011"), "53000", 10), purchase("s2", 4, creditor("S2", "0105500000011"), "53000", 10)}
-	b := Build(m, append(walkIn, shared...), g, 0, DefaultOptions(day(10)))
+	b := Build(m, append(walkIn, shared...), g, 0, mechanicsOptions(day(10)))
 	if findPattern(b, LevelTaxID, "tax:-") != nil {
 		t.Errorf("placeholder tax id must not form an L1 pattern")
 	}

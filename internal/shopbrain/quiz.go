@@ -224,10 +224,14 @@ type EvidenceVote struct {
 type Evidence struct {
 	Level          Level          `json:"level"`
 	Label          string         `json:"label"`  // the key in words: the party, the description, …
-	Status         string         `json:"status"` // used | not_seen | too_few | not_consistent | not_needed
+	Status         string         `json:"status"` // used | not_seen | too_few | not_consistent | not_recent | not_needed
 	Total          int            `json:"total"`  // earlier journals under the key
 	MinSupport     int            `json:"min_support"`
 	MinConsistency float64        `json:"min_consistency"`
+	Confidence     float64        `json:"confidence"`   // what the bar is compared with: the leading share, or its Wilson lower bound
+	Wilson         bool           `json:"wilson"`       // Confidence is a Wilson lower bound
+	RecentNeed     int            `json:"recent_need"`  // last N journals that must match the leading shape (0 = no check)
+	RecentAgree    bool           `json:"recent_agree"` // they do
 	Votes          []EvidenceVote `json:"votes,omitempty"` // most used first, at most 3
 }
 
@@ -242,15 +246,20 @@ func (b *Brain) evidence(i int, g Guess) []Evidence {
 	e := b.entries[i]
 	out := make([]Evidence, 0, len(e.keys))
 	for _, k := range e.keys {
-		ev := Evidence{Level: k.level, Label: keyLabel(k.level, e), MinSupport: minSupport(k.level), MinConsistency: b.Options.minConsistency(k.level)}
+		ev := Evidence{Level: k.level, Label: keyLabel(k.level, e), MinSupport: minSupport(k.level), MinConsistency: b.Options.minConsistency(k.level),
+			Wilson: b.Options.WilsonZ > 0, RecentNeed: b.Options.RecentAgree}
 		counts := map[string]int{}
 		refs := map[string][]EvidenceRef{}
+		var recent []string // newest first while scanning
 		for j := i - 1; j >= 0; j-- { // newest first, so examples are the latest ones
 			p := b.entries[j]
 			if !hasKey(p.keys, k.key) {
 				continue
 			}
 			full := p.shape.fullKey()
+			if len(recent) < keepRecent {
+				recent = append(recent, full)
+			}
 			counts[full]++
 			if len(refs[full]) < evidenceExamples {
 				refs[full] = append(refs[full], EvidenceRef{GuidFixed: p.j.GuidFixed, DocNo: p.j.DocNo, DocDate: p.j.DocDate})
@@ -273,6 +282,14 @@ func (b *Brain) evidence(i int, g Guess) []Evidence {
 			}
 			ev.Votes = append(ev.Votes, EvidenceVote{Shape: b.shapeView(f), Count: counts[f], Examples: refs[f]})
 		}
+		if len(fulls) > 0 {
+			// recentAgrees wants newest last
+			for a, c := 0, len(recent)-1; a < c; a, c = a+1, c-1 {
+				recent[a], recent[c] = recent[c], recent[a]
+			}
+			ev.Confidence = round4(b.Options.confidence(counts[fulls[0]], ev.Total))
+			ev.RecentAgree = b.Options.recentAgrees(recent, fulls[0])
+		}
 		switch {
 		case g.Known() && k.key == g.Key:
 			ev.Status = "used"
@@ -282,8 +299,10 @@ func (b *Brain) evidence(i int, g Guess) []Evidence {
 			ev.Status = "not_seen"
 		case ev.Total < ev.MinSupport:
 			ev.Status = "too_few"
-		default:
+		case ev.Confidence < ev.MinConsistency:
 			ev.Status = "not_consistent"
+		default:
+			ev.Status = "not_recent"
 		}
 		out = append(out, ev)
 	}
@@ -299,8 +318,20 @@ func hasKey(keys []ladderKey, key string) bool {
 	return false
 }
 
-// keyLabel puts a ladder key in the owner's words.
+// keyLabel puts a ladder key in the owner's words; a statement key also says
+// whether money came in or went out.
 func keyLabel(l Level, e entry) string {
+	s := baseKeyLabel(l, e)
+	switch e.dir {
+	case "in":
+		s += " • เงินเข้า"
+	case "out":
+		s += " • เงินออก"
+	}
+	return s
+}
+
+func baseKeyLabel(l Level, e entry) string {
 	switch l {
 	case LevelTaxID:
 		return e.party.TaxID
