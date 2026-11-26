@@ -32,8 +32,9 @@ type OwnerVerifier struct {
 	Client  *http.Client
 	TTL     time.Duration
 
-	mu    sync.Mutex
-	cache map[string]verdict
+	mu        sync.Mutex
+	cache     map[string]verdict
+	usernames map[[32]byte]cachedUsername
 }
 
 type verdict struct {
@@ -134,4 +135,51 @@ func redactURL(err error) error {
 		return fmt.Errorf("%s: %w", ue.Op, ue.Err)
 	}
 	return err
+}
+
+type cachedUsername struct {
+	name string
+	at   time.Time
+}
+
+// username uses the owner request's original token. The returned identity is
+// only audit metadata, never a substitute for Verify.
+func (v *OwnerVerifier) username(ctx context.Context, token string) string {
+	key := sha256.Sum256([]byte(token))
+	v.mu.Lock()
+	cached, ok := v.usernames[key]
+	v.mu.Unlock()
+	if ok && time.Since(cached.at) < v.TTL {
+		return cached.name
+	}
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(v.BaseURL, "/")+"/profile", nil)
+	if err != nil {
+		return "unknown"
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/json")
+	resp, err := v.Client.Do(req)
+	if err != nil {
+		return "unknown"
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Success bool `json:"success"`
+		Data    struct {
+			Username string `json:"username"`
+		} `json:"data"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(resp.Body).Decode(&body) != nil || !body.Success || strings.TrimSpace(body.Data.Username) == "" {
+		return "unknown"
+	}
+	name := strings.TrimSpace(body.Data.Username)
+	v.mu.Lock()
+	if v.usernames == nil {
+		v.usernames = map[[32]byte]cachedUsername{}
+	}
+	v.usernames[key] = cachedUsername{name: name, at: time.Now()}
+	v.mu.Unlock()
+	return name
 }

@@ -141,7 +141,7 @@ func main() {
 	brainHandlers := &shopbrain.Handlers{Svc: shopbrain.NewService(shopbrain.NewOwnerVerifier(configs.MAIN_API_URL))}
 	if configs.BRAIN_MONGO_URI != "" {
 		store := shopbrain.NewMongoFeedback(configs.BRAIN_MONGO_URI, configs.BRAIN_MONGO_DB)
-		brainHandlers.Store, brainHandlers.Tokens = store, store
+		brainHandlers.Store, brainHandlers.Tokens, brainHandlers.Knowledge = store, store, store
 	}
 	billscan.GET("/api/v1/shop-brain", brainHandlers.GetShopBrain)
 	billscan.GET("/api/v1/shop-brain/export", brainHandlers.ExportShopBrain)
@@ -150,11 +150,18 @@ func main() {
 	billscan.POST("/api/v1/shop-brain/ask", brainHandlers.AskBrain)
 	billscan.POST("/api/v1/shop-brain/feedback", brainHandlers.PostFeedback)
 	billscan.GET("/api/v1/shop-brain/feedback/summary", brainHandlers.GetFeedbackSummary)
+	billscan.GET("/api/v1/shop-brain/knowledge", brainHandlers.ListShopKnowledge)
+	billscan.POST("/api/v1/shop-brain/knowledge", brainHandlers.SaveShopKnowledge)
+	billscan.PUT("/api/v1/shop-brain/knowledge/:id", brainHandlers.SaveShopKnowledge)
+	billscan.DELETE("/api/v1/shop-brain/knowledge/:id", brainHandlers.DeleteShopKnowledge)
+	billscan.GET("/api/v1/shop-brain/knowledge/history", brainHandlers.ShopKnowledgeHistory)
+	billscan.GET("/api/v1/shop-brain/prompt", brainHandlers.ShopBrainPrompt)
 	// MCP (read-only): any MCP client (Claude, Codex, Gemini …) talks to one
 	// shop's brain with a per-shop token the owner creates on the page.
 	billscan.GET("/api/v1/shop-brain/mcp-tokens", brainHandlers.ListMCPTokens)
 	billscan.POST("/api/v1/shop-brain/mcp-tokens", brainHandlers.CreateMCPToken)
 	billscan.POST("/api/v1/shop-brain/mcp-tokens/:id/revoke", brainHandlers.RevokeMCPToken)
+	billscan.POST("/api/v1/shop-brain/mcp-tokens/:id/rotate", brainHandlers.RotateMCPToken)
 	billscan.Any("/mcp", gin.WrapH(brainHandlers.MCPHandler()))
 
 	// Step 4: Setup HTTP server with timeouts.

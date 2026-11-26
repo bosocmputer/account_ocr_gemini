@@ -85,3 +85,38 @@ func (h *Handlers) RevokeMCPToken(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": true})
 	}
 }
+
+// RotateMCPToken replaces the active key and shows the new key only once.
+func (h *Handlers) RotateMCPToken(c *gin.Context) {
+	shopID, ok := h.authorize(c)
+	if !ok || !h.tokenStoreReady(c) {
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1024)
+	var in struct {
+		ExpectedHint string `json:"expected_hint"`
+	}
+	if c.Request.ContentLength != 0 {
+		if err := c.ShouldBindJSON(&in); err != nil {
+			knowledgeError(c, http.StatusBadRequest, "ข้อมูลออกรหัสใหม่ไม่ถูกต้อง")
+			return
+		}
+	}
+	plain, replacement, err := NewMCPToken(shopID, "", time.Now())
+	if err != nil {
+		knowledgeError(c, http.StatusInternalServerError, "ออกรหัสใหม่ไม่สำเร็จ")
+		return
+	}
+	updated, err := h.Tokens.RotateToken(c.Request.Context(), shopID, c.Param("id"), in.ExpectedHint, replacement)
+	switch {
+	case errors.Is(err, ErrTokenInvalid):
+		knowledgeError(c, http.StatusNotFound, "ไม่พบรหัสที่ยังใช้งานได้")
+	case errors.Is(err, errTokenRotationConflict):
+		knowledgeError(c, http.StatusConflict, "รหัสนี้เปลี่ยนแล้ว กรุณาโหลดรายการรหัสล่าสุด")
+	case err != nil:
+		h.feedbackUnavailable(c, err)
+	default:
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{"success": true, "token": plain, "data": mcpTokenView{MCPToken: *updated, Status: "active"}})
+	}
+}

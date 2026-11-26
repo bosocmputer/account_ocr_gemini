@@ -126,6 +126,8 @@ type ShopInfo struct {
 	ShopID              string    `json:"shopid"`
 	Name                string    `json:"name"`
 	Names               []rawName `json:"names"`
+	Address             []rawName `json:"address,omitempty"`
+	Telephone           string    `json:"telephone,omitempty"`
 	TaxID               string    `json:"taxid"`
 	BranchCode          string    `json:"branchcode"`
 	PromptShopInfo      string    `json:"promptshopinfo"`

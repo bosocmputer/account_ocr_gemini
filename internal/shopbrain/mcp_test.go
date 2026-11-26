@@ -49,6 +49,23 @@ func (m *memTokens) RevokeToken(_ context.Context, shopID, id string, at time.Ti
 	t.RevokedAt = &at
 	return nil
 }
+
+func (m *memTokens) RotateToken(_ context.Context, shopID, id, expectedHint string, replacement MCPToken) (*MCPToken, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t := m.byID[id]
+	if t == nil || t.ShopID != shopID || t.Status(replacement.CreatedAt) != "active" {
+		return nil, ErrTokenInvalid
+	}
+	if expectedHint != "" && expectedHint != t.Hint {
+		return nil, errTokenRotationConflict
+	}
+	t.Hash, t.Hint, t.CreatedAt, t.ExpiresAt = replacement.Hash, replacement.Hint, replacement.CreatedAt, replacement.ExpiresAt
+	t.LastUsedAt = nil
+	copy := *t
+	return &copy, nil
+}
+
 func (m *memTokens) FindToken(_ context.Context, hash string) (*MCPToken, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -217,7 +234,7 @@ func TestMCPToolsAreReadOnlyAndAnswerFromTheTokensShop(t *testing.T) {
 	}
 	// a bill from creditor C1, read by the AI: name + tax id + amounts, no docformat
 	r := call("suggest_booking", map[string]any{"party_name": "บริษัท ผู้ขาย C1 จำกัด", "taxid": "0105500000001", "total_amount": 1070, "vat_amount": 70})
-	if r.IsError || len(r.Content) != 2 || !strings.Contains(text(r), "REF 1: PVj3") || !strings.Contains(text(r), "Dr 51212") {
+	if r.IsError || len(r.Content) != 2 || !strings.Contains(text(r), "อ้างอิง 1: PVj3") || !strings.Contains(text(r), "Dr 51212") {
 		t.Errorf("suggest_booking: %s", text(r))
 	}
 	var sg Suggestion

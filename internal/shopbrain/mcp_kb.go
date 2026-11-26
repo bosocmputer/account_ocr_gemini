@@ -71,12 +71,15 @@ func dateText(t time.Time) string {
 
 // parseDay reads YYYY-MM-DD (a Buddhist year such as 2569 is accepted).
 func parseDay(s string) (time.Time, error) {
-	t, err := time.ParseInLocation("2006-01-02", strings.TrimSpace(s), bangkok)
+	raw := strings.TrimSpace(s)
+	if len(raw) == len("2006-01-02") {
+		if year, err := strconv.Atoi(raw[:4]); err == nil && year > 2400 {
+			raw = fmt.Sprintf("%04d%s", year-543, raw[4:])
+		}
+	}
+	t, err := time.ParseInLocation("2006-01-02", raw, bangkok)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("วันที่ %q ต้องเป็นรูปแบบ YYYY-MM-DD", s)
-	}
-	if t.Year() > 2400 {
-		t = t.AddDate(-543, 0, 0)
 	}
 	return t, nil
 }
@@ -288,6 +291,12 @@ func (b *Brain) precedents(key string) []int {
 // ---------- suggest_booking ----------
 
 type mcpSuggestInput struct {
+	SellerName  string `json:"seller_name,omitempty" jsonschema:"ชื่อผู้ขายจากหัวบิล"`
+	SellerTaxID string `json:"seller_taxid,omitempty" jsonschema:"เลขผู้เสียภาษีผู้ขายจากหัวบิล"`
+	BuyerName   string `json:"buyer_name,omitempty" jsonschema:"ชื่อผู้ซื้อจากหัวบิล"`
+	BuyerTaxID  string `json:"buyer_taxid,omitempty" jsonschema:"เลขผู้เสียภาษีผู้ซื้อจากหัวบิล"`
+	DocDate     string `json:"doc_date,omitempty" jsonschema:"วันที่บนบิล YYYY-MM-DD รองรับปี พ.ศ. ถ้าไม่ระบุใช้วันที่ปัจจุบันเวลาไทย"`
+
 	PartyName   string  `json:"party_name,omitempty" jsonschema:"ชื่อคู่ค้าตามที่อ่านจากบิล (ผู้ขายถ้าเป็นบิลซื้อ / ลูกค้าถ้าเป็นบิลขาย)"`
 	TaxID       string  `json:"taxid,omitempty" jsonschema:"เลขผู้เสียภาษี 13 หลักของคู่ค้า (ไม่ใช่ของร้านเอง)"`
 	PartyCode   string  `json:"party_code,omitempty" jsonschema:"รหัสคู่ค้า ถ้ารู้แล้วจาก search_parties"`
@@ -307,6 +316,14 @@ type OtherWay struct {
 }
 
 type Suggestion struct {
+	BillType          string          `json:"bill_type,omitempty"`
+	BillTypeReason    string          `json:"bill_type_reason,omitempty"`
+	BillTypeMatchedBy string          `json:"bill_type_matched_by,omitempty"`
+	DocDate           string          `json:"doc_date,omitempty"`
+	Source            string          `json:"source,omitempty"`
+	Shop              *ShopProfile    `json:"shop,omitempty"`
+	AppliedKnowledge  []KnowledgeItem `json:"applied_knowledge"`
+
 	Known           bool         `json:"known"`
 	Level           Level        `json:"level,omitempty"`
 	MatchedBy       string       `json:"matched_by,omitempty"` // the key in words
@@ -360,7 +377,7 @@ func (b *Brain) resolveParty(in mcpSuggestInput, s *Suggestion) partyPicked {
 	if pp.tax != "" {
 		var same []PartyMatch
 		for _, m := range MatchParties(b.Master, pp.tax, 10) {
-			if m.Score >= 1 {
+			if m.Score >= 1 && (pp.kind == "" || m.Kind == pp.kind) {
 				same = append(same, m)
 			}
 		}
@@ -376,6 +393,15 @@ func (b *Brain) resolveParty(in mcpSuggestInput, s *Suggestion) partyPicked {
 	}
 	if name := strings.TrimSpace(in.PartyName); name != "" {
 		ms := MatchParties(b.Master, name, 5)
+		if pp.kind != "" {
+			filtered := ms[:0]
+			for _, match := range ms {
+				if match.Kind == pp.kind {
+					filtered = append(filtered, match)
+				}
+			}
+			ms = filtered
+		}
 		if len(ms) > 0 && ms[0].Score >= 0.95 && (len(ms) == 1 || ms[1].Score < ms[0].Score) {
 			pick(ms[0])
 			return pp
@@ -707,10 +733,18 @@ func shapeLinesText(sv *ShapeView) string {
 
 func (s Suggestion) text() string {
 	var b strings.Builder
+	if s.BillType != "" {
+		label := map[string]string{"sale": "บิลขาย", "purchase": "บิลซื้อ", "unknown": "ยังแยกบิลซื้อหรือขายไม่ได้"}[s.BillType]
+		fmt.Fprintf(&b, "%s • %s\n", label, s.BillTypeReason)
+	}
+
 	if s.Party != nil {
 		fmt.Fprintf(&b, "คู่ค้าในทะเบียน: %s (%s %s) — %s\n", s.Party.Name, s.Party.Kind, s.Party.Code, s.Party.Reason)
 	}
-	if s.Known {
+	if s.Source == "shop_rule" {
+		b.WriteString("วิธีลงบัญชีตามกฎของร้าน:\n")
+		b.WriteString(shapeLinesText(s.Booking))
+	} else if s.Known {
 		fmt.Fprintf(&b, "วิธีลงบัญชีที่ร้านนี้ใช้ (จำจาก%s • เคยบันทึก %d รายการ • ลงแบบนี้ %.0f%%):\n", s.MatchedBy, s.Seen, s.Consistency*100)
 		b.WriteString(shapeLinesText(s.Booking))
 	} else {
@@ -721,6 +755,12 @@ func (s Suggestion) text() string {
 				fmt.Fprintf(&b, " แบบ %d (%d ครั้ง):\n%s", n+1, o.Count, shapeLinesText(&o.Shape))
 			}
 		}
+	}
+	for _, item := range s.AppliedKnowledge {
+		if item.Kind != "rule" {
+			continue
+		}
+		fmt.Fprintf(&b, "กฎที่ใช้ %s • มีผลตั้งแต่ %s\n", item.ID, item.Data.EffectiveDate)
 	}
 	for _, n := range s.AmountNotes {
 		b.WriteString("หมายเหตุยอด: " + n + "\n")
@@ -736,7 +776,7 @@ func (s Suggestion) text() string {
 	}
 	b.WriteString("\n" + s.RefsNote + "\n")
 	for n, r := range s.Refs {
-		label := fmt.Sprintf("REF %d", n+1)
+		label := fmt.Sprintf("อ้างอิง %d", n+1)
 		if r.SameWay != nil && !*r.SameWay {
 			label += " (ลงต่างจากวิธีที่เสนอ)"
 		}
@@ -896,7 +936,7 @@ func (s JournalSearch) text() string {
 	}
 	b.WriteString("\n")
 	for n, r := range s.Refs {
-		b.WriteString(refText(fmt.Sprintf("REF %d", s.Offset+n+1), r))
+		b.WriteString(refText(fmt.Sprintf("อ้างอิง %d", s.Offset+n+1), r))
 	}
 	if more := s.Matched - s.Offset - len(s.Refs); more > 0 {
 		fmt.Fprintf(&b, "ยังมีอีก %d รายการ (ใช้ offset %d)\n", more, s.Offset+len(s.Refs))

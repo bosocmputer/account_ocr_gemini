@@ -68,6 +68,7 @@ type MCPCall struct {
 }
 
 type MCPTokenStore interface {
+	RotateToken(ctx context.Context, shopID, id, expectedHint string, replacement MCPToken) (*MCPToken, error)
 	CreateToken(ctx context.Context, t MCPToken) error
 	ListTokens(ctx context.Context, shopID string) ([]MCPToken, error)
 	RevokeToken(ctx context.Context, shopID, id string, at time.Time) error
@@ -192,4 +193,36 @@ func (m *MongoFeedback) LogCall(ctx context.Context, call MCPCall) error {
 	}
 	_, err = db.Collection(mcpCallsColl).InsertOne(ctx, call)
 	return err
+}
+
+var errTokenRotationConflict = errors.New("mcp token rotation conflict")
+
+// RotateToken swaps the hash atomically on standalone Mongo. The slot and its
+// audit identity stay the same, but only the new key can authenticate.
+func (m *MongoFeedback) RotateToken(ctx context.Context, shopID, id, expectedHint string, replacement MCPToken) (*MCPToken, error) {
+	c, err := m.tokens(ctx)
+	if err != nil {
+		return nil, err
+	}
+	filter := bson.M{"_id": id, "shopid": shopID, "revoked_at": nil, "expires_at": bson.M{"$gt": replacement.CreatedAt}}
+	var prior MCPToken
+	if err := c.FindOne(ctx, filter).Decode(&prior); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, ErrTokenInvalid
+		}
+		return nil, err
+	}
+	if expectedHint != "" && expectedHint != prior.Hint {
+		return nil, errTokenRotationConflict
+	}
+	filter["hash"] = prior.Hash
+	var updated MCPToken
+	err = c.FindOneAndUpdate(ctx, filter, bson.M{
+		"$set":   bson.M{"hash": replacement.Hash, "hint": replacement.Hint, "created_at": replacement.CreatedAt, "expires_at": replacement.ExpiresAt},
+		"$unset": bson.M{"last_used_at": ""},
+	}, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&updated)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, errTokenRotationConflict
+	}
+	return &updated, err
 }

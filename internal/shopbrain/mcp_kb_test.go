@@ -58,7 +58,7 @@ func TestSuggestBookingRefsAreTheRealJournals(t *testing.T) {
 		t.Errorf("ref detail: %+v", r)
 	}
 	txt := s.text()
-	for _, want := range []string{"REF 1: PVj3", "Dr 51212 ค่าขนส่ง 300.00", "Cr 11111 เงินสด 321.00", "VAT 7% ฐาน 300.00 ภาษี 21.00", "http"} {
+	for _, want := range []string{"อ้างอิง 1: PVj3", "Dr 51212 ค่าขนส่ง 300.00", "Cr 11111 เงินสด 321.00", "VAT 7% ฐาน 300.00 ภาษี 21.00", "http"} {
 		has := strings.Contains(txt, want)
 		if want == "http" {
 			if has {

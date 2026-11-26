@@ -100,6 +100,8 @@ type shopRow struct {
 	Names          []rawName `bson:"names"`
 	BranchCode     string    `bson:"branchcode"`
 	PromptShopInfo string    `bson:"promptshopinfo"`
+	Address        []rawName `bson:"address"`
+	Telephone      string    `bson:"telephone"`
 	Settings       struct {
 		TaxID               string `bson:"taxid"`
 		VatTypeSale         *int   `bson:"vattypesale"`
@@ -169,7 +171,7 @@ var (
 	namedProj    = proj("code", "name1", "names.code", "names.name", "names.isdelete", "isdefault")
 	partyProj    = proj("code", "names.code", "names.name", "names.isdelete", "taxid", "branchnumber", "personaltype", "customertype", "accountcode", "accountname", "creditday")
 	itemProj     = proj("code", "names.code", "names.name", "names.isdelete", "accountcode", "accountname")
-	shopProj     = proj("guidfixed", "name1", "names.code", "names.name", "names.isdelete", "branchcode", "promptshopinfo", "settings.taxid", "settings.vattypesale", "settings.vattypepurchase", "settings.inquirytypesale", "settings.inquirytypepurchase", "settings.isusebranch", "settings.isusedepartment", "settings.usebuddhistcalendar", "settings.base_currency")
+	shopProj     = proj("guidfixed", "name1", "names.code", "names.name", "names.isdelete", "branchcode", "promptshopinfo", "address.code", "address.name", "address.isdelete", "telephone", "settings.taxid", "settings.vattypesale", "settings.vattypepurchase", "settings.inquirytypesale", "settings.inquirytypepurchase", "settings.isusebranch", "settings.isusedepartment", "settings.usebuddhistcalendar", "settings.base_currency")
 	templateProj = proj("doccode", "docformat", "description", "module", "bookcode", "accountgroup", "isautoformat", "promptdescription",
 		"details.accountcode", "details.detail", "details.debit", "details.credit", "details.isvatline", "details.linktodebtaccount", "details.isentryselfaccount",
 		"details.accountdebit.accountcode", "details.accountcredit.accountcode")
@@ -195,6 +197,7 @@ func LoadMaster(ctx context.Context, shopID string) (MasterData, int, error) {
 	m.Shop = ShopInfo{
 		ShopID: s.GuidFixed, Name: firstNonEmpty(pickName(s.Names), s.Name1), Names: activeNames(s.Names),
 		TaxID: s.Settings.TaxID, BranchCode: s.BranchCode, PromptShopInfo: s.PromptShopInfo,
+		Address: activeNames(s.Address), Telephone: s.Telephone,
 		VatTypeSale: s.Settings.VatTypeSale, VatTypePurchase: s.Settings.VatTypePurchase,
 		InquiryTypeSale: s.Settings.InquiryTypeSale, InquiryTypePurchase: s.Settings.InquiryTypePurchase,
 		IsUseBranch: s.Settings.IsUseBranch, IsUseDepartment: s.Settings.IsUseDepartment,
