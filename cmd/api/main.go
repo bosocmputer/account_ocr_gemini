@@ -146,7 +146,7 @@ func main() {
 	// above these check the caller: the browser's Bearer token is sent to the
 	// main API's /list-shop and only the shop's owner (role 2) gets through.
 	// See internal/shopbrain.
-	brainHandlers := &shopbrain.Handlers{Svc: shopbrain.NewService(shopbrain.NewOwnerVerifier(configs.MAIN_API_URL))}
+	brainHandlers := &shopbrain.Handlers{Svc: shopbrain.NewService(shopbrain.NewOwnerVerifier(configs.MAIN_API_URL)), DraftModel: shopbrain.GeminiKnowledgeDraft}
 	if configs.BRAIN_MONGO_URI != "" {
 		store := shopbrain.NewMongoFeedback(configs.BRAIN_MONGO_URI, configs.BRAIN_MONGO_DB)
 		brainHandlers.Store, brainHandlers.Tokens, brainHandlers.Knowledge = store, store, store
@@ -160,6 +160,7 @@ func main() {
 	billscan.GET("/api/v1/shop-brain/feedback/summary", brainHandlers.GetFeedbackSummary)
 	billscan.GET("/api/v1/shop-brain/knowledge", brainHandlers.ListShopKnowledge)
 	billscan.POST("/api/v1/shop-brain/knowledge", brainHandlers.SaveShopKnowledge)
+	billscan.POST("/api/v1/shop-brain/knowledge/draft", brainHandlers.GenerateShopKnowledgeDraft)
 	billscan.PUT("/api/v1/shop-brain/knowledge/:id", brainHandlers.SaveShopKnowledge)
 	billscan.DELETE("/api/v1/shop-brain/knowledge/:id", brainHandlers.DeleteShopKnowledge)
 	billscan.GET("/api/v1/shop-brain/knowledge/history", brainHandlers.ShopKnowledgeHistory)

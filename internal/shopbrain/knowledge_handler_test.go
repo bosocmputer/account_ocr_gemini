@@ -74,10 +74,19 @@ func TestShopKnowledgeOwnerHistoryAndPrompt(t *testing.T) {
 	}
 	store := &testKnowledgeStore{records: map[string]KnowledgeItem{}}
 	tokens := newMemTokens()
+	draftCalls := 0
 	h := &Handlers{Svc: service, Knowledge: store, Tokens: tokens}
+	h.DraftModel = func(_ context.Context, in draftContext) (draftProposal, error) {
+		draftCalls++
+		if in.Request == "จำชื่อร้าน" {
+			return draftProposal{Question: "ชื่อที่เห็นบนบิลคืออะไร?"}, nil
+		}
+		return draftProposal{Kind: "alias", Data: KnowledgeData{Name: "ชื่อบนบิลกรณีทดสอบ"}}, nil
+	}
 	router := gin.New()
 	router.GET("/knowledge", h.ListShopKnowledge)
 	router.POST("/knowledge", h.SaveShopKnowledge)
+	router.POST("/knowledge/draft", h.GenerateShopKnowledgeDraft)
 	router.PUT("/knowledge/:id", h.SaveShopKnowledge)
 	router.DELETE("/knowledge/:id", h.DeleteShopKnowledge)
 	router.GET("/knowledge/history", h.ShopKnowledgeHistory)
@@ -97,6 +106,19 @@ func TestShopKnowledgeOwnerHistoryAndPrompt(t *testing.T) {
 		return out
 	}
 	request("GET", "/knowledge?shopid=shopA", "staff", "", 403)
+	draftPath := "/knowledge/draft?shopid=shopA"
+	request("POST", draftPath, "staff", `{"text":"จำชื่อร้าน"}`, 403)
+	request("POST", draftPath, "owner", `{"text":"  "}`, 400)
+	if draftCalls != 0 {
+		t.Fatalf("model called without owner access or valid input")
+	}
+	question := request("POST", draftPath, "owner", `{"text":"จำชื่อร้าน"}`, 200)
+	draft := request("POST", draftPath, "owner", `{"text":"บนบิลใช้ชื่อ ชื่อบนบิลกรณีทดสอบ"}`, 200)
+	if !strings.Contains(question.Body.String(), "ชื่อที่เห็นบนบิลคืออะไร?") ||
+		!strings.Contains(draft.Body.String(), `"kind":"alias"`) || len(store.records) != 0 || len(store.history) != 0 {
+		t.Fatalf("draft or question must never save records: %s %s", question.Body, draft.Body)
+	}
+
 	request("POST", "/knowledge?shopid=shopA", "owner", `{"kind":"rule","data":{"docformat":"PV","effective_date":"2026-11-01","lines":[{"accountcode":"BAD","side":"D"}]}}`, 400)
 	out := request("POST", "/knowledge?shopid=shopA", "owner", `{"kind":"alias","data":{"name":"ชื่อบนบิลกรณีทดสอบ"}}`, 201)
 	var created struct {
