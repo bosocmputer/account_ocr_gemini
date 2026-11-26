@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,13 @@ import (
 	"github.com/bosocmputer/account_ocr_gemini/internal/storage"
 	"github.com/gin-gonic/gin"
 )
+
+func corsMethods(path string) string {
+	if strings.HasPrefix(path, "/billscan/api/v1/shop-brain/knowledge/") {
+		return "POST, GET, PUT, DELETE, OPTIONS"
+	}
+	return "POST, GET, OPTIONS"
+}
 
 func main() {
 	// Step 0: Load configuration from environment variables
@@ -55,7 +63,7 @@ func main() {
 	// Add CORS middleware - configure allowed origins for production
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", configs.ALLOWED_ORIGINS)
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", corsMethods(c.Request.URL.Path))
 		// X-Job-Token: the async job-polling endpoints (GetJobStatusHandler)
 		// require this header to prove ownership of a job — without it in
 		// the preflight allow-list, browsers silently block the polling
