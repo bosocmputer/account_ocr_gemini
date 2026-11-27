@@ -60,3 +60,10 @@ func TestKnowledgeDraftReusesOnlyUnambiguousHistory(t *testing.T) {
 		t.Fatalf("accepted ambiguous history: %+v", result)
 	}
 }
+
+func TestDraftErrorLogHidesGoogleKey(t *testing.T) {
+	got := redactAPIKey("googleapi: Error 400: API key not valid: AIzaSyA1b2C3d4E5f6G7h8I9j0KlMnOpQrStUvW")
+	if strings.Contains(got, "SyA1b2") || !strings.Contains(got, "AIza***") {
+		t.Errorf("key not hidden: %s", got)
+	}
+}

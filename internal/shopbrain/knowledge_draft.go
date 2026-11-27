@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -91,7 +94,10 @@ func (h *Handlers) GenerateShopKnowledgeDraft(c *gin.Context) {
 	defer cancel()
 	proposal, err := h.DraftModel(ctx, b.knowledgeDraftContext(in.Text))
 	if err != nil {
-		knowledgeError(c, http.StatusBadGateway, "สร้างร่างด้วย AI ไม่สำเร็จ กรุณาลองใหม่หรือเพิ่มความรู้ด้วยฟอร์ม")
+		// 503, not 502: a proxy in front (Cloudflare/Caddy) replaces 502 with
+		// its own page without CORS headers, so the page never sees the message
+		log.Printf("shopbrain: knowledge draft failed for shop %s: %s", shopID, redactAPIKey(err.Error()))
+		knowledgeError(c, http.StatusServiceUnavailable, "สร้างร่างด้วย AI ไม่สำเร็จ กรุณาลองใหม่หรือเพิ่มความรู้ด้วยฟอร์ม")
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "data": b.prepareKnowledgeDraft(in.Text, proposal)})
@@ -314,6 +320,11 @@ const knowledgeDraftInstructions = `Translate the user's Thai bookkeeping prefer
 - note: data.text is a Thai accounting practice the AI should consider or ask about. Do not turn an incomplete rule into a note.
 Use accounts, parties and document formats only from the supplied candidates, and ask the user to supply the exact name or code if missing. Do not assume a date; Today is provided for requests that explicitly say today. Convert Thai Buddhist years to Gregorian. Ask for the date and any missing accounting facts in the same question where possible. Only provide one rule/draft per request.`
 
+var googleKey = regexp.MustCompile(`AIza[0-9A-Za-z_\-]{20,}`)
+
+// redactAPIKey hides a Google API key if an error message ever carries one.
+func redactAPIKey(s string) string { return googleKey.ReplaceAllString(s, "AIza***") }
+
 func GeminiKnowledgeDraft(ctx context.Context, input draftContext) (draftProposal, error) {
 	var proposal draftProposal
 	if configs.GEMINI_API_KEY == "" {
@@ -339,7 +350,11 @@ func GeminiKnowledgeDraft(ctx context.Context, input draftContext) (draftProposa
 	}
 	if len(response.Candidates) != 1 || response.Candidates[0].Content == nil ||
 		response.Candidates[0].FinishReason != genai.FinishReasonStop {
-		return proposal, errors.New("Gemini returned an incomplete draft")
+		reason := "no candidate"
+		if len(response.Candidates) > 0 {
+			reason = fmt.Sprintf("finish reason %v, %d candidates", response.Candidates[0].FinishReason, len(response.Candidates))
+		}
+		return proposal, fmt.Errorf("Gemini returned an incomplete draft (%s)", reason)
 	}
 	var output strings.Builder
 	for _, part := range response.Candidates[0].Content.Parts {
@@ -347,6 +362,8 @@ func GeminiKnowledgeDraft(ctx context.Context, input draftContext) (draftProposa
 			output.WriteString(string(value))
 		}
 	}
-	err = json.Unmarshal([]byte(output.String()), &proposal)
-	return proposal, err
+	if err = json.Unmarshal([]byte(output.String()), &proposal); err != nil {
+		return proposal, fmt.Errorf("Gemini draft is not the expected JSON: %w", err)
+	}
+	return proposal, nil
 }
